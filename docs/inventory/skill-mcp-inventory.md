@@ -1,9 +1,9 @@
 # Hermes Skill and MCP Inventory
 
 Generated for Todo 5 on 2026-06-28 from read-only target-environment checks:
-`hermes skills list`, selected local `SKILL.md` files, redacted `config.yaml`
-surface inspection, `hermes plugins list`, command availability probes, and
-official Hermes docs at <https://hermes-agent.nousresearch.com/docs/llms-full.txt>.
+`hermes skills list`, `hermes kanban --help`, selected local `SKILL.md` files,
+redacted `config.yaml` surface inspection, `hermes plugins list`, command
+availability probes, and official Hermes docs.
 
 No secrets were copied. `config.yaml` was used only for toolset, skill, plugin,
 Kanban, and MCP surface facts.
@@ -35,10 +35,14 @@ produce a handoff/fallback plan, not fake success.
 
 ## Proof Notes
 
-- Kanban is configured locally (`kanban.*` settings) and exposed in
-  `platform_toolsets.cli`; official docs describe `kanban_show`,
-  `kanban_list`, `kanban_complete`, `kanban_create`, and related `kanban_*`
-  tools.
+- Kanban is proven by `hermes kanban --help`, local `kanban.*` settings,
+  `platform_toolsets.cli` containing `kanban`, and official docs describing
+  `kanban_show`, `kanban_list`, `kanban_complete`, `kanban_create`, and
+  related `kanban_*` tools. Current `hermes skills list`, `hermes skills list
+  --source all`, and `hermes skills list --source local` probes filtered for
+  `kanban|orchestrator|worker|devops` returned no rows, so this inventory does
+  not use `devops/kanban-orchestrator` or `devops/kanban-worker` as
+  skills-list evidence.
 - Local skills show installed but disabled office surfaces for
   `google-workspace`, `nano-pdf`, `ocr-and-documents`, `powerpoint`,
   `himalaya`, `fastmcp`, `mcporter`, and GitHub skill family entries.

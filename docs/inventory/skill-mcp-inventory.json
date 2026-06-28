@@ -2,7 +2,7 @@
   {
     "capability": "Kanban",
     "status": "installed",
-    "source": "Local proof: hermes skills list shows devops/kanban-orchestrator and devops/kanban-worker; config.yaml has kanban settings and platform_toolsets.cli includes kanban; official docs at https://hermes-agent.nousresearch.com/docs/llms-full.txt describe kanban_* tools and /kanban.",
+    "source": "Local proof: hermes kanban --help exposes Kanban CLI verbs; config.yaml has kanban settings and platform_toolsets.cli includes kanban; official docs at https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban describe model-facing kanban_* tools and /kanban; current hermes skills list probes did not show devops/kanban-orchestrator or devops/kanban-worker.",
     "invocation_path": "Bridge through Hermes kanban surfaces: kanban_* toolset for model workers, hermes kanban CLI, /kanban slash command, and the bundled dashboard plugin.",
     "fallback": "If kanban tools are unavailable in a profile, create an owner-confirmation/manual task record instead of fabricating board writes.",
     "confidence": 0.95,
