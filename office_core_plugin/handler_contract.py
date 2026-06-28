@@ -83,8 +83,9 @@ class SchemaValidationError(Exception):
 
 def wrap_handler(handler: ToolHandler, schema: SchemaSpec | None = None) -> SafeToolHandler:
     def wrapped(args: JSONValue) -> str:
-        operation_id = _operation_id(handler, args)
+        operation_id = _fallback_operation_id(handler)
         try:
+            operation_id = _operation_id(handler, args)
             parsed_args = _parse_args(args)
             _validate_args(parsed_args, schema)
             data = _redact_json(handler(parsed_args))
@@ -98,19 +99,29 @@ def wrap_handler(handler: ToolHandler, schema: SchemaSpec | None = None) -> Safe
                 },
             )
         except SchemaValidationError as exc:
-            return _failure_envelope(
+            return _safe_failure_envelope(
                 operation_id=operation_id,
                 code="handler_validation_error",
                 message=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - plugin boundary must return JSON for every handler failure.
-            return _failure_envelope(
+            return _safe_failure_envelope(
                 operation_id=operation_id,
                 code="handler_runtime_error",
                 message=str(exc),
             )
 
     return wrapped
+
+
+def _safe_failure_envelope(operation_id: str, code: str, message: str) -> str:
+    try:
+        return _failure_envelope(operation_id=operation_id, code=code, message=message)
+    except Exception:  # noqa: BLE001 - final boundary fallback must not raise outward.
+        return (
+            '{"success":false,"operation_id":"handler:fallback","error":'
+            '{"code":"handler_runtime_error","message":"[REDACTED]"},"warnings":[],"data":null}'
+        )
 
 
 def _failure_envelope(operation_id: str, code: str, message: str) -> str:
@@ -209,7 +220,7 @@ def _json_type_name(value: JSONValue) -> JSONTypeName:
 
 
 def _operation_id(handler: ToolHandler, args: JSONValue) -> str:
-    handler_name = f"{handler.__module__}.{handler.__qualname__}"
+    handler_name = _handler_qualified_name(handler)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", handler_name).strip("_")
     try:
         canonical_args = json.dumps(
@@ -218,22 +229,63 @@ def _operation_id(handler: ToolHandler, args: JSONValue) -> str:
             sort_keys=True,
             separators=(",", ":"),
         )
-    except (TypeError, ValueError):
+    except (RecursionError, TypeError, ValueError):
         canonical_args = REDACTED
     digest = hashlib.sha256(f"{handler_name}:{canonical_args}".encode()).hexdigest()[:12]
     return f"{safe_name}:{digest}"
 
 
+def _fallback_operation_id(handler: ToolHandler) -> str:
+    handler_type = type(handler)
+    handler_name = f"{handler_type.__module__}.{handler_type.__qualname__}"
+    digest = hashlib.sha256(handler_name.encode()).hexdigest()[:12]
+    return f"handler:{digest}"
+
+
+def _handler_qualified_name(handler: ToolHandler) -> str:
+    handler_module = getattr(handler, "__module__", None)
+    handler_qualname = getattr(handler, "__qualname__", None)
+    if isinstance(handler_module, str) and isinstance(handler_qualname, str) and handler_qualname:
+        return f"{handler_module}.{handler_qualname}"
+
+    handler_type = type(handler)
+    type_module = handler_type.__module__
+    type_qualname = handler_type.__qualname__
+    if type_module and type_qualname:
+        return f"{type_module}.{type_qualname}"
+
+    digest = hashlib.sha256(repr(handler_type).encode()).hexdigest()[:12]
+    return f"callable.{digest}"
+
+
 def _redact_json(value: JSONValue) -> JSONValue:
+    return _redact_json_value(value, set())
+
+
+def _redact_json_value(value: JSONValue, seen: set[int]) -> JSONValue:
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, list):
-        return [_redact_json(item) for item in value]
+        value_id = id(value)
+        if value_id in seen:
+            return REDACTED
+        seen.add(value_id)
+        try:
+            return [_redact_json_value(item, seen) for item in value]
+        finally:
+            seen.remove(value_id)
     if isinstance(value, dict):
-        return {
-            key: REDACTED if SECRET_KEY_PATTERN.search(key) else _redact_json(item)
-            for key, item in value.items()
-        }
+        value_id = id(value)
+        if value_id in seen:
+            return REDACTED
+        seen.add(value_id)
+        try:
+            return {
+                key: REDACTED if SECRET_KEY_PATTERN.search(key) else _redact_json_value(item, seen)
+                for key, item in value.items()
+            }
+        finally:
+            seen.remove(value_id)
     return value
 
 

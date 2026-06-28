@@ -12,6 +12,11 @@ from office_core_plugin.handler_contract import (
 from office_core_plugin.plugin import TOOL_DEFINITIONS, register, register_tool_definitions
 
 
+class CallableHandler:
+    def __call__(self, args: dict[str, JSONValue]) -> JSONValue:
+        return {"received": args}
+
+
 class FakeHermesContext:
     def __init__(self) -> None:
         self.handlers: dict[str, SafeToolHandler] = {}
@@ -95,6 +100,43 @@ def test_wrap_handler_redacts_secret_values_from_success_data() -> None:
     assert envelope["data"][secret_key] == REDACTED
     assert envelope["data"]["notes"] == [REDACTED]
     assert "token=xyz" not in raw_result
+
+
+def test_wrap_handler_returns_json_when_handler_is_callable_object() -> None:
+    # Given: a callable object handler, which does not expose __qualname__ directly.
+    wrapped = wrap_handler(CallableHandler())
+
+    # When: Hermes invokes the wrapped handler.
+    raw_result = wrapped({"value": "ok"})
+
+    # Then: the call succeeds as a JSON envelope and does not raise outward.
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert envelope["success"] is True
+    assert ".CallableHandler:" in envelope["operation_id"]
+    assert envelope["data"] == {"received": {"value": "ok"}}
+
+
+def test_wrap_handler_returns_json_when_args_are_cyclic_and_secret_bearing() -> None:
+    # Given: malformed cyclic args containing a secret-bearing value.
+    cyclic_args: dict[str, JSONValue] = {"token": "abc123"}
+    cyclic_args["self"] = cyclic_args
+
+    def handler(args: dict[str, JSONValue]) -> JSONValue:
+        raise RuntimeError(f"token={args['token']}")  # noqa: EM102
+
+    wrapped = wrap_handler(handler)
+
+    # When: Hermes invokes the handler with args that cannot be serialized naively.
+    raw_result = wrapped(cyclic_args)
+
+    # Then: the wrapper still returns a JSON failure envelope without leaking the token.
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert envelope["success"] is False
+    assert envelope["error"]["code"] == "handler_runtime_error"
+    assert envelope["error"]["message"] == REDACTED
+    assert "abc123" not in raw_result
 
 
 def test_register_has_no_user_facing_tools_until_tool_definitions_exist() -> None:
