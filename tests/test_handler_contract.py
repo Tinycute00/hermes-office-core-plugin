@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Final
 
 from office_core_plugin.handler_contract import (
     REDACTED,
@@ -11,10 +12,25 @@ from office_core_plugin.handler_contract import (
 )
 from office_core_plugin.plugin import TOOL_DEFINITIONS, register, register_tool_definitions
 
+METADATA_ERROR_MESSAGE: Final = "token=metadata"
+
 
 class CallableHandler:
     def __call__(self, args: dict[str, JSONValue]) -> JSONValue:
         return {"received": args}
+
+
+class HostileCallableMeta(type):
+    def __getattribute__(cls, name: str) -> JSONValue:
+        if name in {"__module__", "__qualname__"}:
+            raise RuntimeError(METADATA_ERROR_MESSAGE)
+        return super().__getattribute__(name)
+
+
+class HostileCallableHandler(metaclass=HostileCallableMeta):
+    def __call__(self, args: dict[str, JSONValue]) -> JSONValue:
+        _ = args
+        return {"unexpected": True}
 
 
 class FakeHermesContext:
@@ -137,6 +153,28 @@ def test_wrap_handler_returns_json_when_args_are_cyclic_and_secret_bearing() -> 
     assert envelope["error"]["code"] == "handler_runtime_error"
     assert envelope["error"]["message"] == REDACTED
     assert "abc123" not in raw_result
+
+
+def test_wrap_handler_returns_json_when_operation_id_fallback_metadata_raises() -> None:
+    # Given: a callable whose type metadata raises during fallback operation-id generation.
+    wrapped = wrap_handler(HostileCallableHandler())
+
+    # When: Hermes invokes the wrapped handler.
+    raw_result = wrapped({})
+
+    # Then: the wrapper still returns a deterministic JSON failure envelope.
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    assert envelope["success"] is False
+    assert envelope["operation_id"] == "handler:fallback"
+    assert envelope["error"] == {
+        "code": "handler_runtime_error",
+        "message": REDACTED,
+    }
+    assert envelope["warnings"] == []
+    assert envelope["data"] is None
+    assert "metadata" not in raw_result
 
 
 def test_register_has_no_user_facing_tools_until_tool_definitions_exist() -> None:

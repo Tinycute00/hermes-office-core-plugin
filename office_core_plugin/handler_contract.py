@@ -27,6 +27,7 @@ SECRET_KEY_PATTERN: Final = re.compile(
     r"(?i)(secret|token|password|api[_-]?key|authorization|credential)",
 )
 REDACTED: Final = "[REDACTED]"
+FALLBACK_OPERATION_ID: Final = "handler:fallback"
 ENVELOPE_KEYS: Final = ("success", "operation_id", "error", "warnings", "data")
 EXACT_JSON_TYPE_NAMES: Final[dict[ExactJsonScalarType, JSONTypeName]] = {
     bool: "boolean",
@@ -83,8 +84,9 @@ class SchemaValidationError(Exception):
 
 def wrap_handler(handler: ToolHandler, schema: SchemaSpec | None = None) -> SafeToolHandler:
     def wrapped(args: JSONValue) -> str:
-        operation_id = _fallback_operation_id(handler)
+        operation_id = FALLBACK_OPERATION_ID
         try:
+            operation_id = _fallback_operation_id(handler)
             operation_id = _operation_id(handler, args)
             parsed_args = _parse_args(args)
             _validate_args(parsed_args, schema)
@@ -119,7 +121,7 @@ def _safe_failure_envelope(operation_id: str, code: str, message: str) -> str:
         return _failure_envelope(operation_id=operation_id, code=code, message=message)
     except Exception:  # noqa: BLE001 - final boundary fallback must not raise outward.
         return (
-            '{"success":false,"operation_id":"handler:fallback","error":'
+            f'{{"success":false,"operation_id":"{FALLBACK_OPERATION_ID}","error":'
             '{"code":"handler_runtime_error","message":"[REDACTED]"},"warnings":[],"data":null}'
         )
 
