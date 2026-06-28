@@ -1,0 +1,110 @@
+[
+  {
+    "capability": "Kanban",
+    "status": "installed",
+    "source": "test proof",
+    "invocation_path": "kanban_*",
+    "fallback": "manual task",
+    "confidence": 0.9,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Excel/spreadsheet",
+    "status": "unknown",
+    "source": "test proof",
+    "invocation_path": "none",
+    "fallback": "manual spreadsheet handoff",
+    "confidence": 0.5,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Word/docx",
+    "status": "available",
+    "source": "test proof",
+    "invocation_path": "document bridge",
+    "fallback": "manual docx handoff",
+    "confidence": 0.7,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "PDF/OCR",
+    "status": "installed",
+    "source": "test proof",
+    "invocation_path": "ocr bridge",
+    "fallback": "manual OCR handoff",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "PowerPoint/PPT",
+    "status": "installed",
+    "source": "test proof",
+    "invocation_path": "powerpoint skill",
+    "fallback": "manual deck handoff",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Google Workspace / Drive / Docs / Sheets / Slides",
+    "status": "installed",
+    "source": "test proof",
+    "invocation_path": "google-workspace",
+    "fallback": "manual Google handoff",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "filesystem/local files",
+    "status": "available",
+    "source": "test proof",
+    "invocation_path": "file toolset",
+    "fallback": "manual file path request",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "GitHub",
+    "status": "installed",
+    "source": "test proof",
+    "invocation_path": "gh",
+    "fallback": "manual GitHub draft",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Linear",
+    "status": "missing",
+    "source": "test proof",
+    "invocation_path": "none",
+    "fallback": "",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Outlook/Gmail/Slack communications",
+    "status": "available",
+    "source": "test proof",
+    "invocation_path": "communications bridge",
+    "fallback": "manual draft",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "MCP general bridge",
+    "status": "available",
+    "source": "test proof",
+    "invocation_path": "mcp_servers",
+    "fallback": "manual bridge plan",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  },
+  {
+    "capability": "Hermes plugin skills / plugin namespace",
+    "status": "available",
+    "source": "test proof",
+    "invocation_path": "ctx.register_skill",
+    "fallback": "manual docs",
+    "confidence": 0.8,
+    "notes": "fixture row"
+  }
+]
