@@ -13,6 +13,13 @@ from office_core_plugin.handler_contract import (
 from office_core_plugin.plugin import TOOL_DEFINITIONS, register, register_tool_definitions
 
 METADATA_ERROR_MESSAGE: Final = "token=metadata"
+SYNTHETIC_SECRET_VALUES: Final = (
+    "tok_runtime_dict_repr_6b491fb8",
+    "secret_runtime_dict_repr_a312d4e9",
+    "password_runtime_dict_repr_4fcfcb47",
+    "api_key_runtime_dict_repr_f2882f02",
+    "authorization_runtime_dict_repr_5bd6b714",
+)
 
 
 class CallableHandler:
@@ -153,6 +160,65 @@ def test_wrap_handler_returns_json_when_args_are_cyclic_and_secret_bearing() -> 
     assert envelope["error"]["code"] == "handler_runtime_error"
     assert envelope["error"]["message"] == REDACTED
     assert "abc123" not in raw_result
+
+
+def test_wrap_handler_redacts_secret_values_from_cyclic_dict_repr_runtime_error() -> None:
+    # Given: cyclic args with secret-bearing fields that will appear through dict repr.
+    cyclic_args: dict[str, JSONValue] = {
+        "token": SYNTHETIC_SECRET_VALUES[0],
+        "secret": SYNTHETIC_SECRET_VALUES[1],
+        "password": SYNTHETIC_SECRET_VALUES[2],
+        "api_key": SYNTHETIC_SECRET_VALUES[3],
+        "authorization": f"Bearer {SYNTHETIC_SECRET_VALUES[4]}",
+    }
+    cyclic_args["self"] = cyclic_args
+
+    def handler(args: dict[str, JSONValue]) -> JSONValue:
+        raise RuntimeError(f"bad args {args}")  # noqa: EM102,TRY003
+
+    wrapped = wrap_handler(handler)
+
+    # When: the handler fails with a message derived from repr(args).
+    raw_result = wrapped(cyclic_args)
+
+    # Then: the JSON failure envelope does not leak raw synthetic secrets.
+    envelope = json.loads(raw_result)
+    assert envelope["success"] is False
+    assert envelope["error"]["code"] == "handler_runtime_error"
+    assert "bad args" in envelope["error"]["message"]
+    for secret_value in SYNTHETIC_SECRET_VALUES:
+        assert secret_value not in raw_result
+
+
+def test_wrap_handler_redacts_colon_json_and_python_repr_secret_values() -> None:
+    # Given: secret-bearing strings in colon, Python repr, and JSON object forms.
+    secret_values = ("colon_secret_a3c58d91", "repr_secret_9cf7c802", "json_secret_0fb49c65")
+    secret_texts = (
+        f"token: {secret_values[0]}",
+        f"'token': '{secret_values[1]}'",
+        f'"token": "{secret_values[2]}"',
+    )
+
+    def handler(args: dict[str, JSONValue]) -> JSONValue:
+        if args.get("mode") == "raise":
+            raise RuntimeError(" | ".join(secret_texts))
+        return {"messages": list(secret_texts)}
+
+    wrapped = wrap_handler(handler)
+
+    # When: the forms appear in an exception message and in success data.
+    failure_result = wrapped({"mode": "raise"})
+    success_result = wrapped({"mode": "return"})
+
+    # Then: both envelopes redact the raw values.
+    failure_envelope = json.loads(failure_result)
+    success_envelope = json.loads(success_result)
+    assert failure_envelope["success"] is False
+    assert success_envelope["success"] is True
+    assert success_envelope["data"]["messages"] == [REDACTED, REDACTED, REDACTED]
+    for secret_value in secret_values:
+        assert secret_value not in failure_result
+        assert secret_value not in success_result
 
 
 def test_wrap_handler_returns_json_when_operation_id_fallback_metadata_raises() -> None:

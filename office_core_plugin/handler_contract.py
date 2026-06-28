@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, TypeAlias, TypedDict
 
+from office_core_plugin.redaction import REDACTED, redact_json, redact_text
+
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 JSONObject: TypeAlias = dict[str, JSONValue]
@@ -20,13 +22,6 @@ JSONTypeName: TypeAlias = Literal[
 ]
 ExactJsonScalarType: TypeAlias = type[bool] | type[int] | type[float] | type[str]
 
-SECRET_TEXT_PATTERN: Final = re.compile(
-    r"(?i)\b(secret|token|password|api[_-]?key|authorization)\s*=\s*[^,\s;]+",
-)
-SECRET_KEY_PATTERN: Final = re.compile(
-    r"(?i)(secret|token|password|api[_-]?key|authorization|credential)",
-)
-REDACTED: Final = "[REDACTED]"
 FALLBACK_OPERATION_ID: Final = "handler:fallback"
 ENVELOPE_KEYS: Final = ("success", "operation_id", "error", "warnings", "data")
 EXACT_JSON_TYPE_NAMES: Final[dict[ExactJsonScalarType, JSONTypeName]] = {
@@ -90,7 +85,7 @@ def wrap_handler(handler: ToolHandler, schema: SchemaSpec | None = None) -> Safe
             operation_id = _operation_id(handler, args)
             parsed_args = _parse_args(args)
             _validate_args(parsed_args, schema)
-            data = _redact_json(handler(parsed_args))
+            data = redact_json(handler(parsed_args))
             return _dump_envelope(
                 {
                     "success": True,
@@ -133,7 +128,7 @@ def _failure_envelope(operation_id: str, code: str, message: str) -> str:
             "operation_id": operation_id,
             "error": {
                 "code": code,
-                "message": _redact_text(message),
+                "message": redact_text(message),
             },
             "warnings": [],
             "data": None,
@@ -226,7 +221,7 @@ def _operation_id(handler: ToolHandler, args: JSONValue) -> str:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", handler_name).strip("_")
     try:
         canonical_args = json.dumps(
-            _redact_json(args),
+            redact_json(args),
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -258,41 +253,6 @@ def _handler_qualified_name(handler: ToolHandler) -> str:
 
     digest = hashlib.sha256(repr(handler_type).encode()).hexdigest()[:12]
     return f"callable.{digest}"
-
-
-def _redact_json(value: JSONValue) -> JSONValue:
-    return _redact_json_value(value, set())
-
-
-def _redact_json_value(value: JSONValue, seen: set[int]) -> JSONValue:
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, list):
-        value_id = id(value)
-        if value_id in seen:
-            return REDACTED
-        seen.add(value_id)
-        try:
-            return [_redact_json_value(item, seen) for item in value]
-        finally:
-            seen.remove(value_id)
-    if isinstance(value, dict):
-        value_id = id(value)
-        if value_id in seen:
-            return REDACTED
-        seen.add(value_id)
-        try:
-            return {
-                key: REDACTED if SECRET_KEY_PATTERN.search(key) else _redact_json_value(item, seen)
-                for key, item in value.items()
-            }
-        finally:
-            seen.remove(value_id)
-    return value
-
-
-def _redact_text(value: str) -> str:
-    return SECRET_TEXT_PATTERN.sub(REDACTED, value)
 
 
 def _dump_envelope(envelope: HandlerEnvelope) -> str:
