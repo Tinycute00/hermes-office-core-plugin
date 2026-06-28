@@ -54,11 +54,11 @@ class HandlerEnvelope(TypedDict):
 
 
 class ToolHandler(Protocol):
-    def __call__(self, args: JSONObject) -> JSONValue: ...
+    def __call__(self, args: JSONObject, **kwargs: JSONValue) -> JSONValue: ...
 
 
 class SafeToolHandler(Protocol):
-    def __call__(self, args: JSONValue) -> str: ...
+    def __call__(self, args: JSONValue, **kwargs: JSONValue) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,14 +78,14 @@ class SchemaValidationError(Exception):
 
 
 def wrap_handler(handler: ToolHandler, schema: SchemaSpec | None = None) -> SafeToolHandler:
-    def wrapped(args: JSONValue) -> str:
+    def wrapped(args: JSONValue, **kwargs: JSONValue) -> str:
         operation_id = FALLBACK_OPERATION_ID
         try:
             operation_id = _fallback_operation_id(handler)
-            operation_id = _operation_id(handler, args)
+            operation_id = _operation_id(handler, args, kwargs)
             parsed_args = _parse_args(args)
             _validate_args(parsed_args, schema)
-            data = redact_json(handler(parsed_args))
+            data = redact_json(handler(parsed_args, **kwargs))
             return _dump_envelope(
                 {
                     "success": True,
@@ -216,12 +216,13 @@ def _json_type_name(value: JSONValue) -> JSONTypeName:
     return "string"
 
 
-def _operation_id(handler: ToolHandler, args: JSONValue) -> str:
+def _operation_id(handler: ToolHandler, args: JSONValue, kwargs: JSONObject) -> str:
     handler_name = _handler_qualified_name(handler)
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", handler_name).strip("_")
     try:
+        operation_input: JSONObject = {"args": args, "kwargs": kwargs}
         canonical_args = json.dumps(
-            redact_json(args),
+            redact_json(operation_input),
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),

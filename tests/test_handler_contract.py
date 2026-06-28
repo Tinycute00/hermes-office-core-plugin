@@ -190,6 +190,65 @@ def test_wrap_handler_redacts_secret_values_from_cyclic_dict_repr_runtime_error(
         assert secret_value not in raw_result
 
 
+def test_wrap_handler_accepts_keyword_context_when_handler_succeeds() -> None:
+    # Given: a handler that accepts Hermes-style keyword context.
+    sentinel_values = ("tok_keyword_success_f8e30a52",)
+
+    def handler(args: dict[str, JSONValue], **kwargs: JSONValue) -> JSONValue:
+        return {"args": args, "context": kwargs["context"]}
+
+    wrapped = wrap_handler(handler)
+
+    # When: Hermes invokes the handler with args plus keyword context.
+    raw_result = wrapped({"value": "ok"}, context={"token": sentinel_values[0]})
+
+    # Then: the wrapper returns the stable JSON envelope without leaking the token.
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    assert envelope["success"] is True
+    assert envelope["error"] is None
+    assert envelope["warnings"] == []
+    assert envelope["data"] == {"args": {"value": "ok"}, "context": {"token": REDACTED}}
+    assert sentinel_values[0] not in raw_result
+
+
+def test_wrap_handler_redacts_args_and_kwargs_from_keyword_runtime_error() -> None:
+    # Given: a handler that raises with repr(args) and repr(kwargs).
+    sentinel_values = (
+        "tok_keyword_failure_2788f7d1",
+        "password_keyword_failure_6db3190a",
+        "api_key_keyword_failure_7fbc76dc",
+    )
+
+    def handler(args: dict[str, JSONValue], **kwargs: JSONValue) -> JSONValue:
+        raise RuntimeError(f"bad args {args} kwargs {kwargs}")  # noqa: EM102,TRY003
+
+    wrapped = wrap_handler(handler)
+
+    # When: args and kwargs both contain raw synthetic secrets.
+    raw_result = wrapped(
+        {
+            "token": sentinel_values[0],
+            "nested": {"json_form": f'"api_key": "{sentinel_values[2]}"'},
+        },
+        context={"token": sentinel_values[0], "python_repr": f"'password': '{sentinel_values[1]}'"},
+        api_key=sentinel_values[2],
+    )
+
+    # Then: the JSON failure envelope is stable and redacts every raw secret.
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    assert envelope["success"] is False
+    assert envelope["error"]["code"] == "handler_runtime_error"
+    assert "bad args" in envelope["error"]["message"]
+    assert envelope["warnings"] == []
+    assert envelope["data"] is None
+    for sentinel_value in sentinel_values:
+        assert sentinel_value not in raw_result
+
+
 def test_wrap_handler_redacts_colon_json_and_python_repr_secret_values() -> None:
     # Given: secret-bearing strings in colon, Python repr, and JSON object forms.
     secret_values = ("colon_secret_a3c58d91", "repr_secret_9cf7c802", "json_secret_0fb49c65")
