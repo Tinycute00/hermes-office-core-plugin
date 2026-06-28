@@ -1,0 +1,7 @@
+include LICENSE
+include README.md
+include __init__.py
+include plugin.yaml
+include pyproject.toml
+recursive-include office_core_plugin *.py *.typed *.yaml
+recursive-include skills *.md
