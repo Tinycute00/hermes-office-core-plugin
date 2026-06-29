@@ -74,6 +74,9 @@ The package exposes `[project.entry-points."hermes_agent.plugins"]` with
 
 - `HERMES_HOME`: points Hermes to the runtime home that owns external plugins and state.
 - `HERMES_PLUGINS_DEBUG=1`: asks Hermes to print plugin load/debug information.
+- `HERMES_OFFICIAL_SOURCE`: optional path to a local Hermes source checkout used by the
+  official `PluginContext` registration contract test. When this variable is unset and the
+  developer-default checkout is absent, CI skips only that local integration probe.
 - `UV_PROJECT_ENVIRONMENT`: used by QA wrappers when they must run Hermes from an isolated
   Python environment without writing into the Hermes checkout.
 
