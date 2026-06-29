@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from importlib import import_module
 from pathlib import Path
 from typing import Final, Protocol, TypeAlias
 
@@ -27,7 +26,9 @@ _COMMAND_UNSUPPORTED_WARNING: Final = (
 _DIAGNOSTIC_SKILL: Final = "office-diagnostic"
 _registration_warnings: tuple[str, ...] = ()
 RegistrationValue: TypeAlias = str | bool | JSONObject | SafeToolHandler
-_REGISTRY_ATTRIBUTES: Final = ("tools", "registry", "tool_registry", "_registry", "_tools")
+_REGISTRY_ATTRIBUTES: Final = (
+    "tools", "handlers", "registry", "tool_registry", "_registry", "_tools"
+)
 
 
 class HermesPluginContext(Protocol):
@@ -56,7 +57,7 @@ def _diagnostic_handler(_args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
 
 def _plan_workflow_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     return {
-        "intent": _string_arg(args, "intent", "unspecified"),
+        "intent": _text_arg_summary(args, "intent", "unspecified"),
         "effect": "none",
         "mode": "draft_plan",
         "next_step": "review_plan",
@@ -65,16 +66,18 @@ def _plan_workflow_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
 
 def _preview_operation_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     return {
-        "operation": _string_arg(args, "operation", "unspecified"),
+        "operation": _text_arg_summary(args, "operation", "unspecified"),
         "effect": "none",
         "mode": "preview",
         "requires_policy_wrapper": True,
     }
 
 
-def _string_arg(args: JSONObject, key: str, default: str) -> str:
+def _text_arg_summary(args: JSONObject, key: str, default: str) -> str:
     value = args.get(key)
-    return redact_text(value) if isinstance(value, str) and value else default
+    if not isinstance(value, str) or not value.strip():
+        return default
+    return "[REDACTED]" if redact_text(value) != value else "provided"
 
 
 TOOL_DEFINITIONS: Final[tuple[ToolDefinition, ...]] = (
@@ -172,46 +175,52 @@ def _preflight_tool_registration(
     definitions: tuple[ToolDefinition, ...],
 ) -> None:
     tool_names = tuple(definition.name for definition in definitions)
-    inspected, duplicate_name = _inspect_registered_tool_names(ctx, tool_names)
+    duplicate_name = _inspect_registered_tool_names(ctx, tool_names)
     if duplicate_name is not None:
         raise PluginRegistrationError(
             step="register_tool preflight",
             detail=f"{duplicate_name}: already registered",
         )
-    if tool_names != TOOL_NAMES:
-        return
-    if (
-        callable(getattr(ctx, "unregister_tool", None))
-        or callable(getattr(ctx, "remove_tool", None))
-        or isinstance(getattr(ctx, "tools", None), dict)
-    ):
-        return
-    if _is_official_hermes_context(ctx) and inspected:
+    rollback_capable = _has_tool_rollback_surface(ctx)
+    if tool_names != TOOL_NAMES and not rollback_capable:
+        raise PluginRegistrationError(
+            step="register_tool preflight",
+            detail="tool definitions differ from the exact office-core tool surface",
+        )
+    if rollback_capable:
         return
     raise PluginRegistrationError(
         step="register_tool preflight",
-        detail="host context has no inspectable official registry or rollback surface",
+        detail="host context has no rollback surface for atomic tool registration",
+    )
+
+
+def _has_tool_rollback_surface(ctx: HermesPluginContext) -> bool:
+    return (
+        callable(getattr(ctx, "unregister_tool", None))
+        or callable(getattr(ctx, "remove_tool", None))
+        or any(
+            isinstance(getattr(ctx, attribute_name, None), dict)
+            for attribute_name in ("tools", "handlers")
+        )
     )
 
 
 def _inspect_registered_tool_names(
     ctx: HermesPluginContext,
     tool_names: tuple[str, ...],
-) -> tuple[bool, str | None]:
-    inspected = False
+) -> str | None:
     for registry_value in (
-        *(getattr(ctx, attribute_name, None) for attribute_name in _REGISTRY_ATTRIBUTES),
-        _official_hermes_registry(ctx),
+        getattr(ctx, attribute_name, None) for attribute_name in _REGISTRY_ATTRIBUTES
     ):
         get_entry = getattr(registry_value, "get_entry", None)
         if callable(get_entry):
-            inspected = True
             duplicate_name = next(
                 (name for name in tool_names if get_entry(name) is not None),
                 None,
             )
             if duplicate_name is not None:
-                return True, duplicate_name
+                return duplicate_name
             continue
         for storage_value in (
             registry_value,
@@ -220,25 +229,10 @@ def _inspect_registered_tool_names(
         ):
             if not isinstance(storage_value, (dict, list, tuple, set, frozenset)):
                 continue
-            inspected = True
             duplicate_name = next((name for name in tool_names if name in storage_value), None)
             if duplicate_name is not None:
-                return True, duplicate_name
-    return inspected, None
-
-
-def _is_official_hermes_context(ctx: HermesPluginContext) -> bool:
-    return type(ctx).__module__ == "hermes_cli.plugins" and type(ctx).__name__ == "PluginContext"
-
-
-def _official_hermes_registry(ctx: HermesPluginContext) -> object | None:
-    if not _is_official_hermes_context(ctx):
-        return None
-    try:
-        registry_module = import_module("tools.registry")
-    except ModuleNotFoundError:
-        return None
-    return getattr(registry_module, "registry", None)
+                return duplicate_name
+    return None
 
 
 def _rollback_registered_tools(
@@ -256,6 +250,12 @@ def _rollback_registered_tools(
     if isinstance(tools, dict):
         for tool_name in tool_names:
             tools.pop(tool_name, None)
+        return
+
+    handlers = getattr(ctx, "handlers", None)
+    if isinstance(handlers, dict):
+        for tool_name in tool_names:
+            handlers.pop(tool_name, None)
 
 
 def _office_observer_hook(**metadata: JSONValue) -> JSONObject:

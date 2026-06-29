@@ -121,7 +121,8 @@ class OfficialLikeRegistry:
 
 
 class OfficialLikeNoRollbackContext:
-    def __init__(self, existing_names: tuple[str, ...] = ()) -> None:
+    def __init__(self, existing_names: tuple[str, ...] = (), failing_name: str = "") -> None:
+        self.failing_name = failing_name
         self.registry = OfficialLikeRegistry(existing_names)
         self.tool_calls: list[str] = []
 
@@ -129,6 +130,9 @@ class OfficialLikeNoRollbackContext:
         name = kwargs["name"]
         assert isinstance(name, str)
         self.tool_calls.append(name)
+        if name == self.failing_name:
+            message = f"registration failed: {name}"
+            raise RuntimeError(message)
         if self.registry.get_entry(name) is not None:
             message = f"duplicate tool: {name}"
             raise RuntimeError(message)
@@ -256,20 +260,45 @@ def test_duplicate_tool_registration_becomes_controlled_plugin_load_error() -> N
     assert ctx.unsafe_writes == []
 
 
-@pytest.mark.parametrize(
-    "failing_name",
-    ["office_plan_workflow", "office_preview_operation"],
-)
-def test_no_rollback_context_fails_closed_before_runtime_registration_failure(
-    failing_name: str,
-) -> None:
-    # Given: an official-like host context without rollback or inspectable registry safety.
-    ctx = FailingNoRollbackContext(failing_name)
+def test_strict_preflight_and_preview_secret_gate_blockers() -> None:
+    # Given: strict registration blockers and opaque free-text preview inputs.
+    definitions = plugin.TOOL_DEFINITIONS
+    base = definitions[0]
+    extra = plugin.ToolDefinition("office_extra_probe", base.schema, base.handler, base.description)
+    mismatch_cases = (
+        (definitions[1], definitions[0], definitions[2]),
+        definitions[:2],
+        (*definitions, extra),
+        (extra,),
+    )
 
-    # When / Then: plugin load fails closed before registering any partial tool surface.
-    with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
-        plugin.register(ctx)
-    assert ctx.tool_calls == []
+    # When / Then: unknown no-rollback definition mismatches fail before registration calls.
+    for definitions in mismatch_cases:
+        ctx = FailingNoRollbackContext("never")
+        with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
+            plugin.register_tool_definitions(ctx, definitions)
+        assert ctx.tool_calls == []
+
+    # When / Then: official-like no-rollback runtime failures fail closed before calls.
+    for context_type in (FailingNoRollbackContext, OfficialLikeNoRollbackContext):
+        for failing_name in ("office_plan_workflow", "office_preview_operation"):
+            ctx = context_type(failing_name=failing_name)
+            with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
+                plugin.register(ctx)
+            assert ctx.tool_calls == []
+
+    # When / Then: read-only previews summarize opaque text without echoing raw values.
+    ctx = FakeHermesContext()
+    plugin.register(ctx)
+    opaque_value = f"opaque free text synthetic gate secret {SYNTHETIC_SECRETS[0]}"
+    for tool_name, field_name in (
+        ("office_plan_workflow", "intent"),
+        ("office_preview_operation", "operation"),
+    ):
+        handler = ctx.tools[tool_name]["handler"]
+        raw_result = handler({field_name: opaque_value})
+        assert _load_envelope(raw_result)["success"] is True
+        assert opaque_value not in raw_result
 
 
 @pytest.mark.parametrize(
