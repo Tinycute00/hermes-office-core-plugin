@@ -178,6 +178,36 @@ def test_malformed_inventory_and_unknown_target_fail_safely_without_secret_leak(
     assert "[REDACTED]" in raw_json
 
 
+def test_bridge_plan_redacts_free_text_bearer_and_api_tokens() -> None:
+    # Given: available document inventory and untrusted inputs containing bare secrets.
+    bearer_value = "sk-test-" + "sisyphus-secret-98765"
+    api_value = "sk-test-" + "office-api-secret-24680"
+    inventory = [
+        _inventory_row("Word/docx", "available", "document bridge", "manual document handoff"),
+    ]
+
+    # When: the bridge plan is serialized for display or JSON transport.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target=BridgeTarget.DOCUMENT,
+            inventory=inventory,
+            inputs={
+                "label": f"Bearer {bearer_value}",
+                "comment": f"paste api token {api_value} into the note",
+                "normal_office_text": "please review the quarterly planning memo",
+            },
+            operation="read document",
+        ),
+    ).to_dict()
+    raw_json = json.dumps(plan, sort_keys=True)
+
+    # Then: credential-shaped free text is redacted without erasing normal prose.
+    assert bearer_value not in raw_json
+    assert api_value not in raw_json
+    assert "[REDACTED]" in raw_json
+    assert plan["inputs"]["normal_office_text"] == "please review the quarterly planning memo"
+
+
 def test_high_risk_write_or_send_handoffs_require_confirmation() -> None:
     # Given: available document and GitHub inventory rows.
     inventory = [

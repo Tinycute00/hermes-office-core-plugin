@@ -11,6 +11,7 @@ AUTHORIZATION_FIELD_PATTERN_SOURCE: Final = r"proxy[_-]?authorization|authorizat
 REDACTION_FIELD_PATTERN_SOURCE: Final = (
     rf"secret|token|password|api[_-]?key|{AUTHORIZATION_FIELD_PATTERN_SOURCE}|credential"
 )
+CREDENTIAL_VALUE_PATTERN_SOURCE: Final = r"[A-Za-z0-9][A-Za-z0-9._~+/\-=]{11,}"
 SECRET_TEXT_PATTERN: Final = re.compile(
     rf"""(?ix)
     (?:
@@ -30,6 +31,26 @@ SECRET_TEXT_PATTERN: Final = re.compile(
             | "[^"]*"
             | [^,\s;}}\]]+
         )
+    )
+    """,
+)
+FREE_TEXT_SECRET_PATTERN: Final = re.compile(
+    rf"""(?ix)
+    (?:
+        \b(?:bearer|basic)\s+{CREDENTIAL_VALUE_PATTERN_SOURCE}
+        |
+        \b(?:api[_\-\s]?(?:key|token)|access[_\-\s]?token|auth[_\-\s]?token)
+        \s+(?:is\s+)?{CREDENTIAL_VALUE_PATTERN_SOURCE}
+        |
+        \b(?:sk|pk)-[A-Za-z0-9][A-Za-z0-9._-]{{10,}}\b
+        |
+        \b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{{20,}}\b
+        |
+        \bgithub_pat_[A-Za-z0-9_]{{20,}}\b
+        |
+        \bAIza[A-Za-z0-9_-]{{20,}}\b
+        |
+        \bya29\.[A-Za-z0-9_-]{{20,}}\b
     )
     """,
 )
@@ -71,7 +92,8 @@ def _redact_json_value(value: JSONValue, seen: set[int]) -> JSONValue:
 
 
 def redact_text(value: str) -> str:
-    return SECRET_TEXT_PATTERN.sub(REDACTED, value)
+    labelled_value = SECRET_TEXT_PATTERN.sub(REDACTED, value)
+    return FREE_TEXT_SECRET_PATTERN.sub(REDACTED, labelled_value)
 
 
 def redact_path_diagnostic(value: str) -> str:
