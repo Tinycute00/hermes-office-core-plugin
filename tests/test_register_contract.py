@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -9,7 +11,6 @@ from office_core_plugin import plugin
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from office_core_plugin.handler_contract import JSONValue, SafeToolHandler
 
@@ -124,6 +125,7 @@ class OfficialLikeNoRollbackContext:
     def __init__(self, existing_names: tuple[str, ...] = (), failing_name: str = "") -> None:
         self.failing_name = failing_name
         self.registry = OfficialLikeRegistry(existing_names)
+        self._plugin_tool_names: set[str] = set()
         self.tool_calls: list[str] = []
 
     def register_tool(self, **kwargs: JSONValue | SafeToolHandler) -> None:
@@ -137,6 +139,7 @@ class OfficialLikeNoRollbackContext:
             message = f"duplicate tool: {name}"
             raise RuntimeError(message)
         self.registry.entries[name] = object()
+        self._plugin_tool_names.add(name)
 
     def register_hook(self, hook_name: str, callback: Callable[..., JSONValue]) -> None:
         _ = hook_name
@@ -279,13 +282,12 @@ def test_strict_preflight_and_preview_secret_gate_blockers() -> None:
             plugin.register_tool_definitions(ctx, definitions)
         assert ctx.tool_calls == []
 
-    # When / Then: official-like no-rollback runtime failures fail closed before calls.
-    for context_type in (FailingNoRollbackContext, OfficialLikeNoRollbackContext):
-        for failing_name in ("office_plan_workflow", "office_preview_operation"):
-            ctx = context_type(failing_name=failing_name)
-            with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
-                plugin.register(ctx)
-            assert ctx.tool_calls == []
+    # When / Then: unknown no-rollback runtime failures fail closed before calls.
+    for failing_name in ("office_plan_workflow", "office_preview_operation"):
+        ctx = FailingNoRollbackContext(failing_name=failing_name)
+        with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
+            plugin.register(ctx)
+        assert ctx.tool_calls == []
 
     # When / Then: read-only previews summarize opaque text without echoing raw values.
     ctx = FakeHermesContext()
@@ -299,6 +301,19 @@ def test_strict_preflight_and_preview_secret_gate_blockers() -> None:
         raw_result = handler({field_name: opaque_value})
         assert _load_envelope(raw_result)["success"] is True
         assert opaque_value not in raw_result
+
+
+def test_official_like_clean_no_rollback_context_registers_exact_tools() -> None:
+    # Given: an official-Hermes-like context exposing get_entry and manager tracking.
+    ctx = OfficialLikeNoRollbackContext()
+
+    # When: the plugin registers on a clean host with no context rollback API.
+    plugin.register(ctx)
+
+    # Then: the exact read-only tool surface is registered and tracked.
+    assert tuple(ctx.tool_calls) == EXPECTED_TOOLS
+    assert tuple(ctx.registry.entries) == EXPECTED_TOOLS
+    assert ctx._plugin_tool_names == set(EXPECTED_TOOLS)
 
 
 @pytest.mark.parametrize(
@@ -315,6 +330,63 @@ def test_official_like_registry_duplicate_fails_before_registration(
     with pytest.raises(plugin.PluginRegistrationError, match=duplicate_name):
         plugin.register(ctx)
     assert ctx.tool_calls == []
+    assert ctx._plugin_tool_names == set()
+
+
+def test_real_hermes_plugin_context_clean_registration_contract() -> None:
+    # Given: the official Hermes PluginContext, ToolRegistry, and manager-owned state.
+    hermes_source = Path(r"C:\Users\88697\AppData\Local\hermes\hermes-agent")
+    hermes_python = hermes_source / ".venv" / "Scripts" / "python.exe"
+    repo_root = Path(__file__).resolve().parents[1]
+    script = "\n".join(
+        (
+            "import json",
+            "import sys",
+            f"sys.path.insert(0, {str(repo_root)!r})",
+            f"sys.path.insert(0, {str(hermes_source)!r})",
+            "from hermes_cli.plugins import PluginContext, PluginManifest",
+            "from office_core_plugin import plugin",
+            "from tools.registry import ToolRegistry",
+            "import tools.registry as registry_module",
+            "class MinimalManager:",
+            "    def __init__(self):",
+            "        self._cli_ref = None",
+            "        self._hooks = {}",
+            "        self._plugin_tool_names = set()",
+            "        self._plugin_commands = {}",
+            "        self._plugin_skills = {}",
+            "registry = ToolRegistry()",
+            "registry_module.registry = registry",
+            "manager = MinimalManager()",
+            'ctx = PluginContext(PluginManifest(name="office-core"), manager)',
+            "plugin.register(ctx)",
+            "print(json.dumps({",
+            '    "tools": registry.get_all_tool_names(),',
+            '    "tracked": sorted(manager._plugin_tool_names),',
+            '    "hooks": sorted(manager._hooks),',
+            '    "commands": sorted(manager._plugin_commands),',
+            '    "skills": sorted(manager._plugin_skills),',
+            "}))",
+        ),
+    )
+
+    # When: the external plugin registers through the official context shape.
+    result = subprocess.run(  # noqa: S603
+        [str(hermes_python), "-c", script],
+        cwd=hermes_source,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    # Then: Hermes-visible state contains exactly this plugin's surface.
+    assert result.returncode == 0, result.stderr
+    proof = json.loads(result.stdout)
+    assert tuple(proof["tools"]) == EXPECTED_TOOLS
+    assert tuple(proof["tracked"]) == EXPECTED_TOOLS
+    assert proof["hooks"] == ["post_tool_call"]
+    assert proof["commands"] == ["office_status"]
+    assert proof["skills"] == ["office-core:office-diagnostic"]
 
 
 @pytest.mark.parametrize(

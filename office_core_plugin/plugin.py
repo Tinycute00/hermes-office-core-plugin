@@ -13,22 +13,23 @@ from .handler_contract import (
 )
 from .redaction import redact_text
 
+try:
+    from tools.registry import registry as _hermes_registry
+except ImportError:
+    _hermes_registry = None
+
 TOOLSET: Final = "office-core"
-TOOL_NAMES: Final = (
-    "office_diagnostic",
-    "office_plan_workflow",
-    "office_preview_operation",
-)
+TOOL_NAMES: Final = ("office_diagnostic", "office_plan_workflow", "office_preview_operation")
 _OFFICE_STATUS_COMMAND: Final = "office_status"
-_COMMAND_UNSUPPORTED_WARNING: Final = (
-    "office_status command skipped: register_command unsupported"
-)
+_COMMAND_UNSUPPORTED_WARNING: Final = "office_status command skipped: register_command unsupported"
 _DIAGNOSTIC_SKILL: Final = "office-diagnostic"
+_REGISTER_TOOL_PREFLIGHT: Final = "register_tool preflight"
 _registration_warnings: tuple[str, ...] = ()
 RegistrationValue: TypeAlias = str | bool | JSONObject | SafeToolHandler
 _REGISTRY_ATTRIBUTES: Final = (
     "tools", "handlers", "registry", "tool_registry", "_registry", "_tools"
 )
+_MANAGER_REGISTRY_ATTRIBUTES: Final = ("_plugin_tool_names", "_tools", "tools")
 
 
 class HermesPluginContext(Protocol):
@@ -37,12 +38,7 @@ class HermesPluginContext(Protocol):
 
 class PluginRegistrationError(RuntimeError):
     def __init__(self, step: str, detail: str) -> None:
-        self.step = step
-        self.detail = detail
-        super().__init__(str(self))
-
-    def __str__(self) -> str:
-        return f"{self.step} failed: {self.detail}"
+        super().__init__(f"{step} failed: {detail}")
 
 
 def _diagnostic_handler(_args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
@@ -116,17 +112,15 @@ def register(ctx: HermesPluginContext) -> None:
     register_tool_definitions(ctx, TOOL_DEFINITIONS)
     register_hook = getattr(ctx, "register_hook", None)
     if not callable(register_hook):
-        raise PluginRegistrationError(
-            step="register_hook",
-            detail="post_tool_call unsupported by host context",
-        )
+        step = "register_hook"
+        detail = "post_tool_call unsupported by host context"
+        raise PluginRegistrationError(step, detail)
     register_hook("post_tool_call", _office_observer_hook)
 
     register_command = getattr(ctx, "register_command", None)
     if callable(register_command):
         register_command(
-            _OFFICE_STATUS_COMMAND,
-            _office_status_command,
+            _OFFICE_STATUS_COMMAND, _office_status_command,
             description="Show Office Core plugin readiness.",
         )
     else:
@@ -175,30 +169,27 @@ def _preflight_tool_registration(
     definitions: tuple[ToolDefinition, ...],
 ) -> None:
     tool_names = tuple(definition.name for definition in definitions)
-    duplicate_name = _inspect_registered_tool_names(ctx, tool_names)
+    duplicate_name, collision_preflight = _inspect_registered_tool_names(ctx, tool_names)
     if duplicate_name is not None:
-        raise PluginRegistrationError(
-            step="register_tool preflight",
-            detail=f"{duplicate_name}: already registered",
-        )
+        detail = f"{duplicate_name}: already registered"
+        raise PluginRegistrationError(_REGISTER_TOOL_PREFLIGHT, detail)
     rollback_capable = _has_tool_rollback_surface(ctx)
     if tool_names != TOOL_NAMES and not rollback_capable:
         raise PluginRegistrationError(
-            step="register_tool preflight",
+            step=_REGISTER_TOOL_PREFLIGHT,
             detail="tool definitions differ from the exact office-core tool surface",
         )
-    if rollback_capable:
+    if rollback_capable or collision_preflight:
         return
     raise PluginRegistrationError(
-        step="register_tool preflight",
-        detail="host context has no rollback surface for atomic tool registration",
+        _REGISTER_TOOL_PREFLIGHT,
+        "host context has no collision preflight surface for safe tool registration",
     )
 
 
 def _has_tool_rollback_surface(ctx: HermesPluginContext) -> bool:
     return (
-        callable(getattr(ctx, "unregister_tool", None))
-        or callable(getattr(ctx, "remove_tool", None))
+        any(callable(getattr(ctx, name, None)) for name in ("unregister_tool", "remove_tool"))
         or any(
             isinstance(getattr(ctx, attribute_name, None), dict)
             for attribute_name in ("tools", "handlers")
@@ -209,18 +200,26 @@ def _has_tool_rollback_surface(ctx: HermesPluginContext) -> bool:
 def _inspect_registered_tool_names(
     ctx: HermesPluginContext,
     tool_names: tuple[str, ...],
-) -> str | None:
+) -> tuple[str | None, bool]:
+    collision_preflight = False
+    manager = getattr(ctx, "_manager", None)
     for registry_value in (
-        getattr(ctx, attribute_name, None) for attribute_name in _REGISTRY_ATTRIBUTES
+        *(getattr(ctx, attribute_name, None) for attribute_name in _REGISTRY_ATTRIBUTES),
+        *(
+            getattr(manager, attribute_name, None)
+            for attribute_name in _MANAGER_REGISTRY_ATTRIBUTES
+        ),
+        _hermes_registry,
     ):
         get_entry = getattr(registry_value, "get_entry", None)
         if callable(get_entry):
+            collision_preflight = True
             duplicate_name = next(
                 (name for name in tool_names if get_entry(name) is not None),
                 None,
             )
             if duplicate_name is not None:
-                return duplicate_name
+                return duplicate_name, collision_preflight
             continue
         for storage_value in (
             registry_value,
@@ -229,10 +228,11 @@ def _inspect_registered_tool_names(
         ):
             if not isinstance(storage_value, (dict, list, tuple, set, frozenset)):
                 continue
+            collision_preflight = True
             duplicate_name = next((name for name in tool_names if name in storage_value), None)
             if duplicate_name is not None:
-                return duplicate_name
-    return None
+                return duplicate_name, collision_preflight
+    return None, collision_preflight
 
 
 def _rollback_registered_tools(
