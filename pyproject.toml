@@ -24,6 +24,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.8",
     "setuptools>=68",
+    "twine>=6.0",
     "wheel>=0.42",
 ]
 
@@ -31,7 +32,7 @@ dev = [
 office-core = "office_core_plugin:register"
 
 [tool.setuptools]
-packages = ["office_core_plugin"]
+packages = ["office_core_plugin", "office_core_plugin.skills"]
 py-modules = []
 include-package-data = true
 

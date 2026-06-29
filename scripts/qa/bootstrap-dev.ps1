@@ -154,17 +154,27 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 Add-Assertion -Name 'venv_python_exists' -Passed (Test-Path -LiteralPath $venvPython) -Detail $venvPython
 
 if ($Failures.Count -eq 0) {
-    $pipUpgrade = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip') -Cwd $resolvedRepo
+    $pipProbe = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'pip', '--version') -Cwd $resolvedRepo
+    if ($pipProbe.ExitCode -ne 0) {
+        $ensurePip = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'ensurepip', '--upgrade') -Cwd $resolvedRepo
+        Add-Assertion -Name 'ensurepip_succeeded' -Passed ($ensurePip.ExitCode -eq 0)
+    } else {
+        Add-Assertion -Name 'pip_already_available' -Passed $true
+    }
+}
+
+if ($Failures.Count -eq 0) {
+    $pipUpgrade = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--upgrade', 'pip') -Cwd $resolvedRepo
     Add-Assertion -Name 'pip_upgrade_succeeded' -Passed ($pipUpgrade.ExitCode -eq 0)
 }
 
 if ($Failures.Count -eq 0) {
-    $editable = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'pip', 'install', '--upgrade', '-e', '.[dev]') -Cwd $resolvedRepo
+    $editable = Invoke-LoggedProcess -File $venvPython -Arguments @('-m', 'pip', 'install', '--quiet', '--upgrade', '-e', '.[dev]') -Cwd $resolvedRepo
     Add-Assertion -Name 'editable_dev_install_succeeded' -Passed ($editable.ExitCode -eq 0)
 }
 
 if ($Failures.Count -eq 0) {
-    $toolCheck = Invoke-LoggedProcess -File $venvPython -Arguments @('-c', 'import build, office_core_plugin, pytest, ruff; print("dev imports ok")') -Cwd $resolvedRepo
+    $toolCheck = Invoke-LoggedProcess -File $venvPython -Arguments @('-c', 'import build, office_core_plugin, pytest, ruff, twine; print("dev imports ok")') -Cwd $resolvedRepo
     Add-Assertion -Name 'dev_tools_and_package_installed' -Passed ($toolCheck.ExitCode -eq 0)
 }
 

@@ -12,6 +12,9 @@ unless a maintainer explicitly opens a separate task. Do not edit Hermes Agent s
 .\scripts\qa\bootstrap-dev.ps1 -RepoRoot .
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check office_core_plugin tests scripts
+.\.venv\Scripts\python.exe -m build
+.\.venv\Scripts\python.exe -m twine check dist/*
+.\.venv\Scripts\python.exe scripts\qa\validate_package_data.py --repo . --dist-dir dist
 .\.venv\Scripts\python.exe scripts\qa\validate_distribution.py --repo .
 ```
 
