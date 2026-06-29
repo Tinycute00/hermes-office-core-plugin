@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from enum import StrEnum, unique
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, assert_never
 
 from .redaction import redact_json, redact_text
 
@@ -149,7 +149,7 @@ class PolicyDecision:
 
 def run_operation(request: OperationRequest, executor: OperationExecutor) -> JSONObject:
     provenance = tuple(item.to_record() for item in request.provenance)
-    if request.flags.is_high_impact:
+    if _is_high_impact(request):
         if request.confirmation_state is ConfirmationState.CONFIRMED:
             return _draft_outcome(request, provenance)
         return _denial_outcome(request, provenance)
@@ -218,6 +218,16 @@ def _draft_outcome(request: OperationRequest, provenance: tuple[JSONObject, ...]
         data=data,
     )
     return _base_outcome(request, provenance, audit, decision)
+
+
+def _is_high_impact(request: OperationRequest) -> bool:
+    match request.kind:
+        case OperationKind.READ:
+            return request.flags.is_high_impact
+        case OperationKind.WRITE | OperationKind.DELETE | OperationKind.EXTERNAL_SEND:
+            return True
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _base_outcome(

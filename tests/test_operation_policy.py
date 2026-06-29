@@ -133,6 +133,43 @@ def test_confirmed_high_impact_operation_creates_draft_only_record(
     assert result["audit"][0]["event_type"] == "draft_created"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [OperationKind.WRITE, OperationKind.DELETE, OperationKind.EXTERNAL_SEND],
+)
+def test_high_impact_kind_with_read_only_flags_creates_draft_only_record(
+    kind: OperationKind,
+) -> None:
+    # Given: a malformed high-impact request whose flags claim read-only work.
+    calls: list[str] = []
+    request = OperationRequest(
+        kind=kind,
+        risk_level=RiskLevel.HIGH,
+        label=f"{kind.value} mismatched flags",
+        flags=OperationFlags(read=True),
+        confirmation_state=ConfirmationState.CONFIRMED,
+        confidence=0.8,
+        provenance=(
+            ProvenanceInput(
+                source_type="user_request",
+                source_uri=f"memory://mismatch/{kind.value}",
+                observed_at=OBSERVED_AT,
+                method="unit_probe",
+            ),
+        ),
+    )
+
+    # When: the wrapper evaluates the inconsistent request.
+    result = run_operation(request, lambda: calls.append("external side effect"))
+
+    # Then: the operation kind fails closed as draft-only and the executor is untouched.
+    assert result["success"] is True
+    assert result["draft_only"] is True
+    assert result["requires_confirmation"] is False
+    assert calls == []
+    assert result["audit"][0]["event_type"] == "draft_created"
+
+
 def test_malformed_policy_inputs_are_rejected() -> None:
     # Given / When / Then: invalid confirmation, confidence, and provenance are rejected.
     with pytest.raises(OperationPolicyError, match="confirmation_state"):

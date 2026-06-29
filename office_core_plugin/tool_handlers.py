@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from time import time_ns
 from typing import Final, assert_never
 
 from .handler_contract import JSONObject, JSONValue, ToolDefinition
@@ -17,6 +19,7 @@ from .redaction import redact_text
 TOOLSET: Final = "office-core"
 TOOL_NAMES: Final = ("office_diagnostic", "office_plan_workflow", "office_preview_operation")
 _registration_warnings: tuple[str, ...] = ()
+_last_observed_at_ns = 0
 
 
 def set_registration_warnings(warnings: tuple[str, ...]) -> None:
@@ -78,7 +81,7 @@ def _preview_operation_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONVa
             ProvenanceInput(
                 source_type="tool_args",
                 source_uri="hermes://office-core/office_preview_operation",
-                observed_at="tool_call",
+                observed_at=_tool_observed_at(),
                 method="preview_operation",
                 content=raw_operation,
             ),
@@ -107,7 +110,7 @@ def _read_request(tool_name: str, label: str, inspected_content: str | None) -> 
             ProvenanceInput(
                 source_type="tool_args",
                 source_uri=f"hermes://office-core/{tool_name}",
-                observed_at="tool_call",
+                observed_at=_tool_observed_at(),
                 method=tool_name,
                 content=inspected_content,
             ),
@@ -120,6 +123,17 @@ def _text_arg_summary(args: JSONObject, key: str, default: str) -> str:
     if value is None:
         return default
     return "[REDACTED]" if redact_text(value) != value else "provided"
+
+
+def _tool_observed_at() -> str:
+    global _last_observed_at_ns  # noqa: PLW0603 - monotonic timestamp state is process-local.
+    timestamp_ns = time_ns()
+    if timestamp_ns <= _last_observed_at_ns:
+        timestamp_ns = _last_observed_at_ns + 1
+    _last_observed_at_ns = timestamp_ns
+    seconds, nanoseconds = divmod(timestamp_ns, 1_000_000_000)
+    observed_at = datetime.fromtimestamp(seconds, UTC)
+    return f"{observed_at:%Y-%m-%dT%H:%M:%S}.{nanoseconds:09d}Z"
 
 
 def _text_arg(args: JSONObject, key: str) -> str | None:
