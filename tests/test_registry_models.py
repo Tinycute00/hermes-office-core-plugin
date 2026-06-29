@@ -116,6 +116,45 @@ def test_malformed_registry_models_are_rejected() -> None:
         )
 
 
+def test_non_hex_evidence_hash_is_rejected() -> None:
+    # Given: a provenance payload with the right digest length but non-hex content.
+    payload = {
+        "source_type": "fixture",
+        "source_uri": "state://x",
+        "observed_at": OBSERVED_AT,
+        "method": "unit",
+        "evidence_hash": "z" * 64,
+        "confidence": 0.7,
+    }
+
+    # When / Then: boundary parsing rejects it as malformed provenance.
+    with pytest.raises(RegistryError, match="evidence_hash"):
+        ProvenanceRecord.from_dict(payload)
+
+
+def test_invalid_classification_diagnostic_redacts_untrusted_secret_text() -> None:
+    # Given: an invalid enum value containing untrusted authorization text.
+    token = "sk-test-" + "SECRET-1234567890"
+    raw_authorization = f"Authorization: Bearer {token}"
+    payload = {
+        "template_id": "tpl",
+        "name": "Invoice",
+        "version": "1",
+        "classification": f"latest {raw_authorization}",
+        "confidence": 0.9,
+        "provenance": [_provenance().to_dict()],
+    }
+
+    # When: the payload is parsed at the registry boundary.
+    with pytest.raises(RegistryError) as exc_info:
+        TemplateIdentity.from_dict(payload)
+
+    # Then: diagnostics identify the enum failure without leaking the raw secret.
+    assert "classification" in str(exc_info.value)
+    assert raw_authorization not in str(exc_info.value)
+    assert raw_authorization not in repr(exc_info.value)
+
+
 def test_owner_confirmation_serializes_round_trip() -> None:
     # Given: an unresolved owner confirmation item for ambiguous source records.
     item = OwnerConfirmationItem(

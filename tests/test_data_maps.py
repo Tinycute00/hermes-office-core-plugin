@@ -39,10 +39,11 @@ def _source_record(
     candidate_id: str,
     confidence: float,
     mtime: str,
+    template_id: str = "tpl-customer",
 ) -> SourceRecord:
     return SourceRecord(
         record_id=record_id,
-        template_id="tpl-customer",
+        template_id=template_id,
         candidate=CandidateFile(
             candidate_id=candidate_id,
             location=SourceLocation(
@@ -115,6 +116,31 @@ def test_high_confidence_source_can_be_selected_without_mtime_tiebreak() -> None
     # Then: the high-confidence source is selected.
     assert result.status == "selected"
     assert result.selected_record == source
+
+
+def test_high_confidence_source_for_other_template_is_not_selected() -> None:
+    # Given: stale state has one latest high-confidence source for a different template.
+    source = _source_record(
+        "source-other",
+        "candidate-other",
+        0.93,
+        "2026-06-28T00:00:00Z",
+        template_id="tpl-other",
+    )
+
+    # When: the caller asks for main source selection for the requested template.
+    result = SourceSelectionResult.from_candidates(
+        template_id="tpl-requested",
+        source_records=(source,),
+        owner_confirmations=(),
+    )
+
+    # Then: the mismatched source cannot satisfy the requested template.
+    assert result.status == "needs_owner_confirmation"
+    assert result.selected_record is None
+    assert result.owner_confirmation is not None
+    assert result.owner_confirmation.template_id == "tpl-requested"
+    assert result.owner_confirmation.candidate_ids == ()
 
 
 def test_reusable_data_dictionary_preserves_provenance_and_downstream_outputs(

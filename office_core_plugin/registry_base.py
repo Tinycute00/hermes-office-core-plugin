@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import StrEnum, unique
 from typing import TYPE_CHECKING, Final, assert_never
 
 from .operation_policy import ConfidenceScoreError, confidence_band
+from .redaction import redact_text
 
 if TYPE_CHECKING:
     from .handler_contract import JSONObject, JSONValue
 
-SHA256_HEX_LENGTH: Final = 64
+SHA256_HEX_PATTERN: Final = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 
 
 @unique
@@ -49,7 +51,10 @@ def classification(data: JSONObject, field: str) -> TemplateClassification:
     try:
         return TemplateClassification(value)
     except ValueError as exc:
-        raise RegistryError(field, f"unsupported classification {value!r}") from exc
+        raise RegistryError(
+            field,
+            f"unsupported classification {redact_text(value)!r}",
+        ) from exc
 
 
 def confirmation_state(data: JSONObject, field: str) -> OwnerConfirmationState:
@@ -57,7 +62,10 @@ def confirmation_state(data: JSONObject, field: str) -> OwnerConfirmationState:
     try:
         return OwnerConfirmationState(value)
     except ValueError as exc:
-        raise RegistryError(field, f"unsupported confirmation state {value!r}") from exc
+        raise RegistryError(
+            field,
+            f"unsupported confirmation state {redact_text(value)!r}",
+        ) from exc
 
 
 def objects(data: JSONObject, field: str) -> tuple[JSONObject, ...]:
@@ -108,7 +116,7 @@ def optional_text(data: JSONObject, field: str) -> str | None:
 
 def hash_text(data: JSONObject, field: str) -> str:
     value = text(data, field)
-    if len(value) == SHA256_HEX_LENGTH:
+    if SHA256_HEX_PATTERN.fullmatch(value):
         return value
     raise RegistryError(field, "must be a sha256 hex digest")
 

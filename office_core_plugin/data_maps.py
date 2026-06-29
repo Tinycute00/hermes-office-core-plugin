@@ -36,15 +36,18 @@ class SourceSelectionResult:
         source_records: tuple[SourceRecord, ...],
         owner_confirmations: tuple[OwnerConfirmationItem, ...],
     ) -> Self:
-        confirmed = _confirmed_selection(template_id, source_records, owner_confirmations)
+        matching_records = tuple(
+            record for record in source_records if record.template_id == template_id
+        )
+        confirmed = _confirmed_selection(template_id, matching_records, owner_confirmations)
         if confirmed is not None:
             return cls("selected", confirmed.record, confirmed.confirmation)
-        if len(source_records) == 1 and source_records[0].confidence >= CONFIDENCE_HIGH_MIN:
-            return cls("selected", source_records[0], None)
+        if len(matching_records) == 1 and matching_records[0].confidence >= CONFIDENCE_HIGH_MIN:
+            return cls("selected", matching_records[0], None)
         return cls(
             "needs_owner_confirmation",
             None,
-            _pending_confirmation(template_id, source_records),
+            _pending_confirmation(template_id, matching_records),
         )
 
 
