@@ -211,6 +211,23 @@ def test_duplicate_tool_registration_becomes_controlled_plugin_load_error() -> N
     assert ctx.unsafe_writes == []
 
 
+@pytest.mark.parametrize(
+    "duplicate_name",
+    ["office_plan_workflow", "office_preview_operation"],
+)
+def test_duplicate_tool_registration_rolls_back_prior_tools(
+    duplicate_name: str,
+) -> None:
+    # Given: a host context that rejects a later duplicate public tool name.
+    ctx = DuplicateToolContext(duplicate_name)
+
+    # When / Then: plugin load fails with a controlled error and leaves no partial tool surface.
+    with pytest.raises(plugin.PluginRegistrationError, match=duplicate_name):
+        plugin.register(ctx)
+    assert ctx.tools == {}
+    assert ctx.unsafe_writes == []
+
+
 def test_diagnostic_skill_is_registered_under_qualified_name() -> None:
     # Given: a Hermes context with plugin skill registration.
     ctx = FakeHermesContext()

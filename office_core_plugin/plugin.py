@@ -133,6 +133,7 @@ def register_tool_definitions(
     ctx: HermesPluginContext,
     definitions: tuple[ToolDefinition, ...],
 ) -> None:
+    registered_names: list[str] = []
     for definition in definitions:
         try:
             ctx.register_tool(
@@ -143,11 +144,35 @@ def register_tool_definitions(
                 description=definition.description,
                 is_async=False,
             )
+            registered_names.append(definition.name)
         except Exception as exc:
+            _rollback_registered_tools(ctx, tuple(registered_names))
             raise PluginRegistrationError(
                 step="register_tool",
                 detail=f"{definition.name}: {exc}",
             ) from exc
+
+
+def _rollback_registered_tools(
+    ctx: HermesPluginContext,
+    tool_names: tuple[str, ...],
+) -> None:
+    unregister_tool = getattr(ctx, "unregister_tool", None)
+    if callable(unregister_tool):
+        for tool_name in reversed(tool_names):
+            unregister_tool(tool_name)
+        return
+
+    remove_tool = getattr(ctx, "remove_tool", None)
+    if callable(remove_tool):
+        for tool_name in reversed(tool_names):
+            remove_tool(tool_name)
+        return
+
+    tools = getattr(ctx, "tools", None)
+    if isinstance(tools, dict):
+        for tool_name in tool_names:
+            tools.pop(tool_name, None)
 
 
 def _register_observer_hook(ctx: HermesPluginContext) -> None:
