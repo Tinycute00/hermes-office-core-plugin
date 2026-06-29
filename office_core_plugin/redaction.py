@@ -7,12 +7,22 @@ JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 REDACTED: Final = "[REDACTED]"
+AUTHORIZATION_FIELD_PATTERN_SOURCE: Final = r"proxy[_-]?authorization|authorization"
 REDACTION_FIELD_PATTERN_SOURCE: Final = (
-    r"secret|token|password|api[_-]?key|authorization|credential"
+    rf"secret|token|password|api[_-]?key|{AUTHORIZATION_FIELD_PATTERN_SOURCE}|credential"
 )
 SECRET_TEXT_PATTERN: Final = re.compile(
     rf"""(?ix)
     (?:
+        ['"]?\b(?:{AUTHORIZATION_FIELD_PATTERN_SOURCE})\b['"]?
+        \s*(?:=|:)\s*
+        (?:
+            '[^']*'
+            | "[^"]*"
+            | (?:bearer|basic)\s+[^,\s;}}\]]+
+            | [^,\s;}}\]]+
+        )
+        |
         ['"]?\b(?:{REDACTION_FIELD_PATTERN_SOURCE})\b['"]?
         \s*(?:=|:)\s*
         (?:

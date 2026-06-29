@@ -52,6 +52,13 @@ class FakeHermesContext:
         self.handlers[name] = handler
 
 
+def _load_stable_envelope(raw_result: str) -> dict[str, JSONValue]:
+    envelope = json.loads(raw_result)
+    assert isinstance(raw_result, str)
+    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    return envelope
+
+
 def test_wrap_handler_returns_validation_error_json_when_required_arg_missing() -> None:
     # Given: a handler that requires one string argument.
     schema = {
@@ -70,9 +77,7 @@ def test_wrap_handler_returns_validation_error_json_when_required_arg_missing() 
     raw_result = wrapped({})
 
     # Then: the failure is a JSON envelope, not an outward exception.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
-    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is False
     assert envelope["data"] is None
     assert envelope["warnings"] == []
@@ -133,8 +138,7 @@ def test_wrap_handler_returns_json_when_handler_is_callable_object() -> None:
     raw_result = wrapped({"value": "ok"})
 
     # Then: the call succeeds as a JSON envelope and does not raise outward.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is True
     assert ".CallableHandler:" in envelope["operation_id"]
     assert envelope["data"] == {"received": {"value": "ok"}}
@@ -154,8 +158,7 @@ def test_wrap_handler_returns_json_when_args_are_cyclic_and_secret_bearing() -> 
     raw_result = wrapped(cyclic_args)
 
     # Then: the wrapper still returns a JSON failure envelope without leaking the token.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is False
     assert envelope["error"]["code"] == "handler_runtime_error"
     assert envelope["error"]["message"] == REDACTED
@@ -203,9 +206,7 @@ def test_wrap_handler_accepts_keyword_context_when_handler_succeeds() -> None:
     raw_result = wrapped({"value": "ok"}, context={"token": sentinel_values[0]})
 
     # Then: the wrapper returns the stable JSON envelope without leaking the token.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
-    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is True
     assert envelope["error"] is None
     assert envelope["warnings"] == []
@@ -237,9 +238,7 @@ def test_wrap_handler_redacts_args_and_kwargs_from_keyword_runtime_error() -> No
     )
 
     # Then: the JSON failure envelope is stable and redacts every raw secret.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
-    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is False
     assert envelope["error"]["code"] == "handler_runtime_error"
     assert "bad args" in envelope["error"]["message"]
@@ -247,6 +246,35 @@ def test_wrap_handler_redacts_args_and_kwargs_from_keyword_runtime_error() -> No
     assert envelope["data"] is None
     for sentinel_value in sentinel_values:
         assert sentinel_value not in raw_result
+
+
+def test_wrap_handler_redacts_authorization_colon_values_from_runtime_error() -> None:
+    # Given: nested args and kwargs with authorization-like colon values.
+    auth_values = ("tok_al_712b", "tok_au_68ff", "tok_ab_f893", "tok_pa_77c5", "tok_rj_2c6e")
+    auth_texts = (
+        f"authorization: Bearer {auth_values[0]}",
+        f"Authorization: Bearer {auth_values[1]}",
+        f"authorization: Basic {auth_values[2]}",
+        f"proxy-authorization: Bearer {auth_values[3]}",
+        f"'authorization': 'Bearer {auth_values[4]}'",
+        f'"Authorization": "Bearer {auth_values[1]}"',
+    )
+
+    def handler(args: dict[str, JSONValue], **kwargs: JSONValue) -> JSONValue:
+        raise RuntimeError(f"bad args {args} kwargs {kwargs}")  # noqa: EM102,TRY003
+
+    # When: the handler fails with repr(args) and repr(kwargs) in its error.
+    raw_result = wrap_handler(handler)(
+        {"headers": list(auth_texts[:3])},
+        context={"headers": list(auth_texts[3:])},
+    )
+
+    # Then: the JSON failure envelope is stable and redacts every raw token.
+    envelope = _load_stable_envelope(raw_result)
+    assert envelope["success"] is False
+    assert "bad args" in envelope["error"]["message"]
+    for auth_value in auth_values:
+        assert auth_value not in raw_result
 
 
 def test_wrap_handler_redacts_colon_json_and_python_repr_secret_values() -> None:
@@ -288,9 +316,7 @@ def test_wrap_handler_returns_json_when_operation_id_fallback_metadata_raises() 
     raw_result = wrapped({})
 
     # Then: the wrapper still returns a deterministic JSON failure envelope.
-    envelope = json.loads(raw_result)
-    assert isinstance(raw_result, str)
-    assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
+    envelope = _load_stable_envelope(raw_result)
     assert envelope["success"] is False
     assert envelope["operation_id"] == "handler:fallback"
     assert envelope["error"] == {
