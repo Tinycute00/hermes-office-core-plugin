@@ -12,19 +12,24 @@ from .handler_contract import (
     wrap_handler,
 )
 from .redaction import redact_text
+from .tool_handlers import (
+    TOOL_DEFINITIONS,
+    TOOL_NAMES,
+    TOOLSET,
+    add_registration_warning,
+    registration_warnings,
+    set_registration_warnings,
+)
 
 try:
     from tools.registry import registry as _hermes_registry
 except ImportError:
     _hermes_registry = None
 
-TOOLSET: Final = "office-core"
-TOOL_NAMES: Final = ("office_diagnostic", "office_plan_workflow", "office_preview_operation")
 _OFFICE_STATUS_COMMAND: Final = "office_status"
 _COMMAND_UNSUPPORTED_WARNING: Final = "office_status command skipped: register_command unsupported"
 _DIAGNOSTIC_SKILL: Final = "office-diagnostic"
 _REGISTER_TOOL_PREFLIGHT: Final = "register_tool preflight"
-_registration_warnings: tuple[str, ...] = ()
 RegistrationValue: TypeAlias = str | bool | JSONObject | SafeToolHandler
 _REGISTRY_ATTRIBUTES: Final = (
     "tools", "handlers", "registry", "tool_registry", "_registry", "_tools"
@@ -41,74 +46,8 @@ class PluginRegistrationError(RuntimeError):
         super().__init__(f"{step} failed: {detail}")
 
 
-def _diagnostic_handler(_args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
-    return {
-        "plugin": TOOLSET,
-        "status": "ready",
-        "read_only": True,
-        "tools": list(TOOL_NAMES),
-        "warnings": list(_registration_warnings),
-    }
-
-
-def _plan_workflow_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
-    return {
-        "intent": _text_arg_summary(args, "intent", "unspecified"),
-        "effect": "none",
-        "mode": "draft_plan",
-        "next_step": "review_plan",
-    }
-
-
-def _preview_operation_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
-    return {
-        "operation": _text_arg_summary(args, "operation", "unspecified"),
-        "effect": "none",
-        "mode": "preview",
-        "requires_policy_wrapper": True,
-    }
-
-
-def _text_arg_summary(args: JSONObject, key: str, default: str) -> str:
-    value = args.get(key)
-    if not isinstance(value, str) or not value.strip():
-        return default
-    return "[REDACTED]" if redact_text(value) != value else "provided"
-
-
-TOOL_DEFINITIONS: Final[tuple[ToolDefinition, ...]] = (
-    ToolDefinition(
-        "office_diagnostic",
-        {"type": "object", "additionalProperties": True},
-        _diagnostic_handler,
-        "Inspect Office Core plugin readiness and safety metadata.",
-    ),
-    ToolDefinition(
-        "office_plan_workflow",
-        {
-            "type": "object",
-            "properties": {"intent": {"type": "string"}, "workflow_type": {"type": "string"}},
-            "additionalProperties": True,
-        },
-        _plan_workflow_handler,
-        "Plan an office workflow as a draft.",
-    ),
-    ToolDefinition(
-        "office_preview_operation",
-        {
-            "type": "object",
-            "properties": {"operation": {"type": "string"}, "summary": {"type": "string"}},
-            "additionalProperties": True,
-        },
-        _preview_operation_handler,
-        "Preview an office operation as a draft.",
-    ),
-)
-
-
 def register(ctx: HermesPluginContext) -> None:
-    global _registration_warnings  # noqa: PLW0603 - registration diagnostics are process-local.
-    _registration_warnings = ()
+    set_registration_warnings(())
     register_tool_definitions(ctx, TOOL_DEFINITIONS)
     register_hook = getattr(ctx, "register_hook", None)
     if not callable(register_hook):
@@ -124,7 +63,7 @@ def register(ctx: HermesPluginContext) -> None:
             description="Show Office Core plugin readiness.",
         )
     else:
-        _registration_warnings = (*_registration_warnings, _COMMAND_UNSUPPORTED_WARNING)
+        add_registration_warning(_COMMAND_UNSUPPORTED_WARNING)
         record_warning = getattr(ctx, "record_warning", None)
         if callable(record_warning):
             record_warning(_COMMAND_UNSUPPORTED_WARNING)
@@ -276,7 +215,7 @@ def _office_status_command(_raw_args: str = "") -> str:
         "plugin": TOOLSET,
         "status": "ready",
         "tools": list(TOOL_NAMES),
-        "warnings": list(_registration_warnings),
+        "warnings": list(registration_warnings()),
     }
     return json.dumps(
         status,
