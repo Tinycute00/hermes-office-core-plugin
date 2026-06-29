@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from importlib import import_module
 from pathlib import Path
 from typing import Final, Protocol, TypeAlias
 
@@ -26,6 +27,7 @@ _COMMAND_UNSUPPORTED_WARNING: Final = (
 _DIAGNOSTIC_SKILL: Final = "office-diagnostic"
 _registration_warnings: tuple[str, ...] = ()
 RegistrationValue: TypeAlias = str | bool | JSONObject | SafeToolHandler
+_REGISTRY_ATTRIBUTES: Final = ("tools", "registry", "tool_registry", "_registry", "_tools")
 
 
 class HermesPluginContext(Protocol):
@@ -33,9 +35,6 @@ class HermesPluginContext(Protocol):
 
 
 class PluginRegistrationError(RuntimeError):
-    step: str
-    detail: str
-
     def __init__(self, step: str, detail: str) -> None:
         self.step = step
         self.detail = detail
@@ -45,9 +44,7 @@ class PluginRegistrationError(RuntimeError):
         return f"{self.step} failed: {self.detail}"
 
 
-def _diagnostic_handler(args: JSONObject, **kwargs: JSONValue) -> JSONValue:
-    _ = args
-    _ = kwargs
+def _diagnostic_handler(_args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     return {
         "plugin": TOOLSET,
         "status": "ready",
@@ -57,65 +54,55 @@ def _diagnostic_handler(args: JSONObject, **kwargs: JSONValue) -> JSONValue:
     }
 
 
-def _plan_workflow_handler(args: JSONObject, **kwargs: JSONValue) -> JSONValue:
-    _ = kwargs
+def _plan_workflow_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     return {
-        "mode": "draft_plan",
-        "effect": "none",
         "intent": _string_arg(args, "intent", "unspecified"),
+        "effect": "none",
+        "mode": "draft_plan",
         "next_step": "review_plan",
     }
 
 
-def _preview_operation_handler(args: JSONObject, **kwargs: JSONValue) -> JSONValue:
-    _ = kwargs
+def _preview_operation_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     return {
-        "mode": "preview",
-        "effect": "none",
         "operation": _string_arg(args, "operation", "unspecified"),
+        "effect": "none",
+        "mode": "preview",
         "requires_policy_wrapper": True,
     }
 
 
 def _string_arg(args: JSONObject, key: str, default: str) -> str:
     value = args.get(key)
-    if isinstance(value, str) and value:
-        return redact_text(value)
-    return default
+    return redact_text(value) if isinstance(value, str) and value else default
 
 
 TOOL_DEFINITIONS: Final[tuple[ToolDefinition, ...]] = (
     ToolDefinition(
-        name="office_diagnostic",
-        schema={"type": "object", "additionalProperties": True},
-        handler=_diagnostic_handler,
-        description="Inspect Office Core plugin readiness and safety metadata.",
+        "office_diagnostic",
+        {"type": "object", "additionalProperties": True},
+        _diagnostic_handler,
+        "Inspect Office Core plugin readiness and safety metadata.",
     ),
     ToolDefinition(
-        name="office_plan_workflow",
-        schema={
+        "office_plan_workflow",
+        {
             "type": "object",
-            "properties": {
-                "intent": {"type": "string"},
-                "workflow_type": {"type": "string"},
-            },
+            "properties": {"intent": {"type": "string"}, "workflow_type": {"type": "string"}},
             "additionalProperties": True,
         },
-        handler=_plan_workflow_handler,
-        description="Plan an office workflow as a draft.",
+        _plan_workflow_handler,
+        "Plan an office workflow as a draft.",
     ),
     ToolDefinition(
-        name="office_preview_operation",
-        schema={
+        "office_preview_operation",
+        {
             "type": "object",
-            "properties": {
-                "operation": {"type": "string"},
-                "summary": {"type": "string"},
-            },
+            "properties": {"operation": {"type": "string"}, "summary": {"type": "string"}},
             "additionalProperties": True,
         },
-        handler=_preview_operation_handler,
-        description="Preview an office operation as a draft.",
+        _preview_operation_handler,
+        "Preview an office operation as a draft.",
     ),
 )
 
@@ -124,15 +111,42 @@ def register(ctx: HermesPluginContext) -> None:
     global _registration_warnings  # noqa: PLW0603 - registration diagnostics are process-local.
     _registration_warnings = ()
     register_tool_definitions(ctx, TOOL_DEFINITIONS)
-    _register_observer_hook(ctx)
-    _register_status_command(ctx)
-    _register_diagnostic_skill(ctx)
+    register_hook = getattr(ctx, "register_hook", None)
+    if not callable(register_hook):
+        raise PluginRegistrationError(
+            step="register_hook",
+            detail="post_tool_call unsupported by host context",
+        )
+    register_hook("post_tool_call", _office_observer_hook)
+
+    register_command = getattr(ctx, "register_command", None)
+    if callable(register_command):
+        register_command(
+            _OFFICE_STATUS_COMMAND,
+            _office_status_command,
+            description="Show Office Core plugin readiness.",
+        )
+    else:
+        _registration_warnings = (*_registration_warnings, _COMMAND_UNSUPPORTED_WARNING)
+        record_warning = getattr(ctx, "record_warning", None)
+        if callable(record_warning):
+            record_warning(_COMMAND_UNSUPPORTED_WARNING)
+
+    register_skill = getattr(ctx, "register_skill", None)
+    if callable(register_skill):
+        skill_path = Path(__file__).parent / "skills" / _DIAGNOSTIC_SKILL / "SKILL.md"
+        register_skill(
+            _DIAGNOSTIC_SKILL,
+            skill_path,
+            description="Read-only Office Core diagnostic checklist.",
+        )
 
 
 def register_tool_definitions(
     ctx: HermesPluginContext,
     definitions: tuple[ToolDefinition, ...],
 ) -> None:
+    _preflight_tool_registration(ctx, definitions)
     registered_names: list[str] = []
     for definition in definitions:
         try:
@@ -153,21 +167,90 @@ def register_tool_definitions(
             ) from exc
 
 
+def _preflight_tool_registration(
+    ctx: HermesPluginContext,
+    definitions: tuple[ToolDefinition, ...],
+) -> None:
+    tool_names = tuple(definition.name for definition in definitions)
+    inspected, duplicate_name = _inspect_registered_tool_names(ctx, tool_names)
+    if duplicate_name is not None:
+        raise PluginRegistrationError(
+            step="register_tool preflight",
+            detail=f"{duplicate_name}: already registered",
+        )
+    if tool_names != TOOL_NAMES:
+        return
+    if (
+        callable(getattr(ctx, "unregister_tool", None))
+        or callable(getattr(ctx, "remove_tool", None))
+        or isinstance(getattr(ctx, "tools", None), dict)
+    ):
+        return
+    if _is_official_hermes_context(ctx) and inspected:
+        return
+    raise PluginRegistrationError(
+        step="register_tool preflight",
+        detail="host context has no inspectable official registry or rollback surface",
+    )
+
+
+def _inspect_registered_tool_names(
+    ctx: HermesPluginContext,
+    tool_names: tuple[str, ...],
+) -> tuple[bool, str | None]:
+    inspected = False
+    for registry_value in (
+        *(getattr(ctx, attribute_name, None) for attribute_name in _REGISTRY_ATTRIBUTES),
+        _official_hermes_registry(ctx),
+    ):
+        get_entry = getattr(registry_value, "get_entry", None)
+        if callable(get_entry):
+            inspected = True
+            duplicate_name = next(
+                (name for name in tool_names if get_entry(name) is not None),
+                None,
+            )
+            if duplicate_name is not None:
+                return True, duplicate_name
+            continue
+        for storage_value in (
+            registry_value,
+            getattr(registry_value, "entries", None),
+            getattr(registry_value, "_tools", None),
+        ):
+            if not isinstance(storage_value, (dict, list, tuple, set, frozenset)):
+                continue
+            inspected = True
+            duplicate_name = next((name for name in tool_names if name in storage_value), None)
+            if duplicate_name is not None:
+                return True, duplicate_name
+    return inspected, None
+
+
+def _is_official_hermes_context(ctx: HermesPluginContext) -> bool:
+    return type(ctx).__module__ == "hermes_cli.plugins" and type(ctx).__name__ == "PluginContext"
+
+
+def _official_hermes_registry(ctx: HermesPluginContext) -> object | None:
+    if not _is_official_hermes_context(ctx):
+        return None
+    try:
+        registry_module = import_module("tools.registry")
+    except ModuleNotFoundError:
+        return None
+    return getattr(registry_module, "registry", None)
+
+
 def _rollback_registered_tools(
     ctx: HermesPluginContext,
     tool_names: tuple[str, ...],
 ) -> None:
-    unregister_tool = getattr(ctx, "unregister_tool", None)
-    if callable(unregister_tool):
-        for tool_name in reversed(tool_names):
-            unregister_tool(tool_name)
-        return
-
-    remove_tool = getattr(ctx, "remove_tool", None)
-    if callable(remove_tool):
-        for tool_name in reversed(tool_names):
-            remove_tool(tool_name)
-        return
+    for method_name in ("unregister_tool", "remove_tool"):
+        method = getattr(ctx, method_name, None)
+        if callable(method):
+            for tool_name in reversed(tool_names):
+                method(tool_name)
+            return
 
     tools = getattr(ctx, "tools", None)
     if isinstance(tools, dict):
@@ -175,81 +258,29 @@ def _rollback_registered_tools(
             tools.pop(tool_name, None)
 
 
-def _register_observer_hook(ctx: HermesPluginContext) -> None:
-    register_hook = getattr(ctx, "register_hook", None)
-    if not callable(register_hook):
-        raise PluginRegistrationError(
-            step="register_hook",
-            detail="post_tool_call unsupported by host context",
-        )
-    register_hook("post_tool_call", _office_observer_hook)
-
-
 def _office_observer_hook(**metadata: JSONValue) -> JSONObject:
+    tool_name = metadata.get("tool_name")
+    operation_id = metadata.get("operation_id")
+    success = metadata.get("success")
     return {
         "plugin": TOOLSET,
         "event": "post_tool_call",
-        "tool_name": _metadata_text(metadata, "tool_name"),
-        "operation_id": _metadata_text(metadata, "operation_id"),
-        "success": _metadata_success(metadata),
+        "tool_name": redact_text(tool_name) if isinstance(tool_name, str) else "",
+        "operation_id": redact_text(operation_id) if isinstance(operation_id, str) else "",
+        "success": success if isinstance(success, bool) else None,
     }
 
 
-def _metadata_text(metadata: JSONObject, key: str) -> str:
-    value = metadata.get(key)
-    if isinstance(value, str):
-        return redact_text(value)
-    return ""
-
-
-def _metadata_success(metadata: JSONObject) -> bool | None:
-    value = metadata.get("success")
-    if isinstance(value, bool):
-        return value
-    return None
-
-
-def _register_status_command(ctx: HermesPluginContext) -> None:
-    register_command = getattr(ctx, "register_command", None)
-    if callable(register_command):
-        register_command(
-            _OFFICE_STATUS_COMMAND,
-            _office_status_command,
-            description="Show Office Core plugin readiness.",
-        )
-        return
-    _record_registration_warning(ctx, _COMMAND_UNSUPPORTED_WARNING)
-
-
-def _office_status_command(raw_args: str = "") -> str:
-    _ = raw_args
+def _office_status_command(_raw_args: str = "") -> str:
+    status = {
+        "plugin": TOOLSET,
+        "status": "ready",
+        "tools": list(TOOL_NAMES),
+        "warnings": list(_registration_warnings),
+    }
     return json.dumps(
-        {
-            "plugin": TOOLSET,
-            "status": "ready",
-            "tools": list(TOOL_NAMES),
-            "warnings": list(_registration_warnings),
-        },
+        status,
         allow_nan=False,
         ensure_ascii=True,
         separators=(",", ":"),
-    )
-
-
-def _record_registration_warning(ctx: HermesPluginContext, message: str) -> None:
-    global _registration_warnings  # noqa: PLW0603 - registration diagnostics are process-local.
-    _registration_warnings = (*_registration_warnings, message)
-    record_warning = getattr(ctx, "record_warning", None)
-    if callable(record_warning):
-        record_warning(message)
-
-
-def _register_diagnostic_skill(ctx: HermesPluginContext) -> None:
-    register_skill = getattr(ctx, "register_skill", None)
-    if not callable(register_skill):
-        return
-    register_skill(
-        _DIAGNOSTIC_SKILL,
-        Path(__file__).parent / "skills" / _DIAGNOSTIC_SKILL / "SKILL.md",
-        description="Read-only Office Core diagnostic checklist.",
     )

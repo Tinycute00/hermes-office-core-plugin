@@ -94,6 +94,51 @@ class DuplicateToolContext(FakeHermesContext):
         super().register_tool(**kwargs)
 
 
+class FailingNoRollbackContext:
+    def __init__(self, failing_name: str) -> None:
+        self.failing_name = failing_name
+        self.tool_calls: list[str] = []
+
+    def register_tool(self, **kwargs: JSONValue | SafeToolHandler) -> None:
+        name = kwargs["name"]
+        assert isinstance(name, str)
+        self.tool_calls.append(name)
+        if name == self.failing_name:
+            message = f"registration failed: {name}"
+            raise RuntimeError(message)
+
+    def register_hook(self, hook_name: str, callback: Callable[..., JSONValue]) -> None:
+        _ = hook_name
+        _ = callback
+
+
+class OfficialLikeRegistry:
+    def __init__(self, existing_names: tuple[str, ...] = ()) -> None:
+        self.entries = {name: object() for name in existing_names}
+
+    def get_entry(self, name: str) -> object | None:
+        return self.entries.get(name)
+
+
+class OfficialLikeNoRollbackContext:
+    def __init__(self, existing_names: tuple[str, ...] = ()) -> None:
+        self.registry = OfficialLikeRegistry(existing_names)
+        self.tool_calls: list[str] = []
+
+    def register_tool(self, **kwargs: JSONValue | SafeToolHandler) -> None:
+        name = kwargs["name"]
+        assert isinstance(name, str)
+        self.tool_calls.append(name)
+        if self.registry.get_entry(name) is not None:
+            message = f"duplicate tool: {name}"
+            raise RuntimeError(message)
+        self.registry.entries[name] = object()
+
+    def register_hook(self, hook_name: str, callback: Callable[..., JSONValue]) -> None:
+        _ = hook_name
+        _ = callback
+
+
 def _load_envelope(raw_result: str) -> dict[str, JSONValue]:
     envelope = json.loads(raw_result)
     assert isinstance(envelope, dict)
@@ -209,6 +254,38 @@ def test_duplicate_tool_registration_becomes_controlled_plugin_load_error() -> N
         plugin.register(ctx)
     assert ctx.tools == {}
     assert ctx.unsafe_writes == []
+
+
+@pytest.mark.parametrize(
+    "failing_name",
+    ["office_plan_workflow", "office_preview_operation"],
+)
+def test_no_rollback_context_fails_closed_before_runtime_registration_failure(
+    failing_name: str,
+) -> None:
+    # Given: an official-like host context without rollback or inspectable registry safety.
+    ctx = FailingNoRollbackContext(failing_name)
+
+    # When / Then: plugin load fails closed before registering any partial tool surface.
+    with pytest.raises(plugin.PluginRegistrationError, match="preflight"):
+        plugin.register(ctx)
+    assert ctx.tool_calls == []
+
+
+@pytest.mark.parametrize(
+    "duplicate_name",
+    ["office_plan_workflow", "office_preview_operation"],
+)
+def test_official_like_registry_duplicate_fails_before_registration(
+    duplicate_name: str,
+) -> None:
+    # Given: an official-like host registry with a later tool name already claimed.
+    ctx = OfficialLikeNoRollbackContext((duplicate_name,))
+
+    # When / Then: plugin load fails during preflight before any register_tool call.
+    with pytest.raises(plugin.PluginRegistrationError, match=duplicate_name):
+        plugin.register(ctx)
+    assert ctx.tool_calls == []
 
 
 @pytest.mark.parametrize(
