@@ -4,4 +4,4 @@ include __init__.py
 include plugin.yaml
 include pyproject.toml
 recursive-include office_core_plugin *.py *.typed *.yaml
-recursive-include skills *.md
+recursive-include office_core_plugin/skills *.md

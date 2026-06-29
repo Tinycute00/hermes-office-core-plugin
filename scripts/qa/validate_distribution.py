@@ -159,7 +159,7 @@ def check_manifest_rules(repo: Path) -> CheckResult:
         "include __init__.py",
         "include plugin.yaml",
         "recursive-include office_core_plugin",
-        "recursive-include skills *.md",
+        "recursive-include office_core_plugin/skills *.md",
     )
     missing = [fragment for fragment in required_fragments if fragment not in manifest_text]
     return CheckResult("manifest_inclusion_rules", not missing, f"missing={missing}")
@@ -204,6 +204,7 @@ def check_sdist(repo: Path) -> CheckResult:
         "office_core_plugin/plugin.py",
         "office_core_plugin/plugin.yaml",
         "office_core_plugin/py.typed",
+        "office_core_plugin/skills/office-diagnostic/SKILL.md",
     )
     missing = [
         suffix

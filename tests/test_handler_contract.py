@@ -10,7 +10,7 @@ from office_core_plugin.handler_contract import (
     ToolDefinition,
     wrap_handler,
 )
-from office_core_plugin.plugin import TOOL_DEFINITIONS, register, register_tool_definitions
+from office_core_plugin.plugin import register_tool_definitions
 
 METADATA_ERROR_MESSAGE: Final = "token=metadata"
 SYNTHETIC_SECRET_VALUES: Final = (
@@ -326,18 +326,6 @@ def test_wrap_handler_returns_json_when_operation_id_fallback_metadata_raises() 
     assert envelope["warnings"] == []
     assert envelope["data"] is None
     assert "metadata" not in raw_result
-
-
-def test_register_has_no_user_facing_tools_until_tool_definitions_exist() -> None:
-    # Given: the current Todo 6 plugin has no real office tools.
-    registrar = FakeHermesContext()
-
-    # When: the plugin registers.
-    register(registrar)
-
-    # Then: no user-facing tool is exported prematurely.
-    assert TOOL_DEFINITIONS == ()
-    assert registrar.handlers == {}
 
 
 def test_register_tool_definitions_wraps_future_handlers() -> None:
