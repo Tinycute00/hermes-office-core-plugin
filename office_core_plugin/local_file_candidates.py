@@ -8,7 +8,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Final, Protocol
 
 from .operation_policy import confidence_band
-from .redaction import redact_text
+from .redaction import redact_path_diagnostic, redact_text
 
 if TYPE_CHECKING:
     from os import stat_result
@@ -85,7 +85,7 @@ class CandidateDenial:
     reason: str
 
     def to_dict(self) -> JSONObject:
-        return {"path": redact_text(self.path), "reason": self.reason}
+        return {"path": redact_path_diagnostic(self.path), "reason": self.reason}
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,7 +102,7 @@ class CandidateAuditEvent:
             "reason": self.reason,
         }
         if self.path is not None:
-            data["path"] = redact_text(self.path)
+            data["path"] = redact_path_diagnostic(self.path)
         return data
 
 

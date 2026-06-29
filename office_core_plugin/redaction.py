@@ -36,6 +36,7 @@ SECRET_TEXT_PATTERN: Final = re.compile(
 SECRET_KEY_PATTERN: Final = re.compile(
     rf"(?i)({REDACTION_FIELD_PATTERN_SOURCE})",
 )
+PATH_SEPARATOR_PATTERN: Final = re.compile(r"([\\/]+)")
 
 
 def redact_json(value: JSONValue) -> JSONValue:
@@ -71,3 +72,18 @@ def _redact_json_value(value: JSONValue, seen: set[int]) -> JSONValue:
 
 def redact_text(value: str) -> str:
     return SECRET_TEXT_PATTERN.sub(REDACTED, value)
+
+
+def redact_path_diagnostic(value: str) -> str:
+    parts = PATH_SEPARATOR_PATTERN.split(value)
+    return "".join(
+        _redact_path_segment(part) if index % 2 == 0 else part
+        for index, part in enumerate(parts)
+    )
+
+
+def _redact_path_segment(value: str) -> str:
+    redacted_value = redact_text(value)
+    if redacted_value != value or SECRET_KEY_PATTERN.search(value):
+        return REDACTED
+    return value

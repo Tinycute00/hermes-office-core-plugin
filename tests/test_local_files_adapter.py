@@ -110,6 +110,46 @@ def test_traversal_or_absolute_outside_root_returns_denial_without_reading_targe
     assert "[REDACTED]" in raw_json
 
 
+def test_outside_root_secret_like_filename_is_redacted_in_denial_diagnostics(
+    tmp_path: Path,
+) -> None:
+    # Given: an outside-root path with a secret-like filename.
+    root = tmp_path / "allowed"
+    root.mkdir()
+    filename = "customer-secret-plain-9f0d1c2e.xlsx"
+    outside = _write(tmp_path / "outside" / filename)
+
+    # When: the absolute outside path is requested.
+    result = discover_local_file_candidates(
+        _config(root, ConfigOptions(requested_paths=(outside,))),
+    )
+    raw_json = json.dumps(result.to_dict(), sort_keys=True)
+
+    # Then: denial and audit diagnostics redact the risky path segment.
+    assert result.success is False
+    assert result.candidates == ()
+    assert [item.reason for item in result.denials] == ["path_outside_allowed_roots"]
+    assert filename not in raw_json
+    assert "secret-plain-9f0d1c2e" not in raw_json
+    assert "[REDACTED]" in raw_json
+
+
+def test_allowed_candidate_secret_like_filename_keeps_candidate_path(
+    tmp_path: Path,
+) -> None:
+    # Given: an allowed-root file with a secret-like filename.
+    root = tmp_path / "allowed"
+    report = _write(root / "customer-secret-plain-9f0d1c2e.xlsx")
+
+    # When: the adapter discovers candidates from that root.
+    result = discover_local_file_candidates(_config(root))
+    payload = result.to_dict()
+
+    # Then: candidate output preserves the allowed user filename contract.
+    assert payload["denials"] == []
+    assert payload["candidates"][0]["path"] == str(report.resolve())
+
+
 def test_symlink_escape_is_denied_without_descending(tmp_path: Path) -> None:
     # Given: an allowed root with a symlink pointing outside it.
     root = tmp_path / "allowed"
