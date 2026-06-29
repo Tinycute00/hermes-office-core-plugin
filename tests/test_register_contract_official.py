@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from tests.register_contract_helpers import EXPECTED_TOOLS
+from tests.register_contract_helpers import EXPECTED_SKILLS, EXPECTED_TOOLS
 
 
 def test_real_hermes_plugin_context_clean_registration_contract() -> None:
@@ -60,4 +60,4 @@ def test_real_hermes_plugin_context_clean_registration_contract() -> None:
     assert tuple(proof["tracked"]) == EXPECTED_TOOLS
     assert proof["hooks"] == ["post_tool_call"]
     assert proof["commands"] == ["office_status"]
-    assert proof["skills"] == ["office-core:office-diagnostic"]
+    assert proof["skills"] == sorted(EXPECTED_SKILLS)

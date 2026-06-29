@@ -205,6 +205,9 @@ def check_sdist(repo: Path) -> CheckResult:
         "office_core_plugin/plugin.yaml",
         "office_core_plugin/py.typed",
         "office_core_plugin/skills/office-diagnostic/SKILL.md",
+        "office_core_plugin/skills/office-template-update/SKILL.md",
+        "office_core_plugin/skills/office-data-package/SKILL.md",
+        "office_core_plugin/skills/office-reuse-data/SKILL.md",
     )
     missing = [
         suffix

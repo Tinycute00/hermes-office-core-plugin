@@ -4,6 +4,7 @@ import json
 
 from office_core_plugin import plugin
 from tests.register_contract_helpers import (
+    EXPECTED_SKILLS,
     EXPECTED_TOOLS,
     FORBIDDEN_OPERATION_TERMS,
     SYNTHETIC_SECRETS,
@@ -112,15 +113,16 @@ def test_office_status_command_skips_gracefully_without_command_api() -> None:
     assert ctx.warnings == ["office_status command skipped: register_command unsupported"]
 
 
-def test_diagnostic_skill_is_registered_under_qualified_name() -> None:
+def test_plugin_skills_are_registered_under_qualified_names() -> None:
     # Given: a Hermes context with plugin skill registration.
     ctx = FakeHermesContext()
 
     # When: the plugin registers.
     plugin.register(ctx)
 
-    # Then: the read-only diagnostic skill is locatable by qualified name.
-    skill_path = ctx.skills["office-core:office-diagnostic"]
-    assert skill_path.name == "SKILL.md"
-    assert skill_path.is_file()
-    assert "office-core:office-diagnostic" in skill_path.read_text(encoding="utf-8")
+    # Then: every plugin-shipped skill is locatable by qualified name.
+    assert tuple(ctx.skills) == EXPECTED_SKILLS
+    for qualified_name, skill_path in ctx.skills.items():
+        assert skill_path.name == "SKILL.md"
+        assert skill_path.is_file()
+        assert qualified_name in skill_path.read_text(encoding="utf-8")

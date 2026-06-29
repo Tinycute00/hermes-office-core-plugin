@@ -14,6 +14,12 @@ EXPECTED_TOOLS: Final = (
     "office_plan_workflow",
     "office_preview_operation",
 )
+EXPECTED_SKILLS: Final = (
+    "office-core:office-diagnostic",
+    "office-core:office-template-update",
+    "office-core:office-data-package",
+    "office-core:office-reuse-data",
+)
 FORBIDDEN_OPERATION_TERMS: Final = (
     "write",
     "send",

@@ -29,6 +29,11 @@ except ImportError:
 _OFFICE_STATUS_COMMAND: Final = "office_status"
 _COMMAND_UNSUPPORTED_WARNING: Final = "office_status command skipped: register_command unsupported"
 _DIAGNOSTIC_SKILL: Final = "office-diagnostic"
+_WORKFLOW_SKILLS: Final = (
+    "office-template-update",
+    "office-data-package",
+    "office-reuse-data",
+)
 _REGISTER_TOOL_PREFLIGHT: Final = "register_tool preflight"
 RegistrationValue: TypeAlias = str | bool | JSONObject | SafeToolHandler
 _REGISTRY_ATTRIBUTES: Final = (
@@ -70,12 +75,13 @@ def register(ctx: HermesPluginContext) -> None:
 
     register_skill = getattr(ctx, "register_skill", None)
     if callable(register_skill):
-        skill_path = Path(__file__).parent / "skills" / _DIAGNOSTIC_SKILL / "SKILL.md"
-        register_skill(
-            _DIAGNOSTIC_SKILL,
-            skill_path,
-            description="Read-only Office Core diagnostic checklist.",
-        )
+        for skill_name in (_DIAGNOSTIC_SKILL, *_WORKFLOW_SKILLS):
+            skill_path = Path(__file__).parent / "skills" / skill_name / "SKILL.md"
+            register_skill(
+                skill_name,
+                skill_path,
+                description=f"Office Core workflow skill: {skill_name}.",
+            )
 
 
 def register_tool_definitions(

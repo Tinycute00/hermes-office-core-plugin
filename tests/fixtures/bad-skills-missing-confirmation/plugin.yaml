@@ -1,0 +1,5 @@
+name: office-core
+version: 0.1.0
+display_name: Office Core
+description: Bad fixture for skill validator.
+entrypoint: __init__.py
