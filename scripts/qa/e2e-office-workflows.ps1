@@ -19,6 +19,8 @@ $ErrorActionPreference = 'Stop'
 
 $PluginName = 'office-core'
 $RemoteSpec = 'Tinycute00/hermes-office-core-plugin'
+$RemoteSubdirSpec = "$RemoteSpec/office_core_plugin"
+$RemoteBranchTreeSpec = 'https://github.com/Tinycute00/hermes-office-core-plugin/tree/codex/hermes-office-external-plugin/office_core_plugin'
 $HermesCheckout = 'C:\Users\88697\AppData\Local\hermes\hermes-agent'
 $Runner = Join-Path $PSScriptRoot 'run-hermes-cli.ps1'
 $PluginSmoke = Join-Path $PSScriptRoot 'plugin-smoke.ps1'
@@ -29,7 +31,6 @@ $TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) "hermes-office-e2e-$PID"
 $ArtifactRoot = Join-Path $TempRoot 'artifacts'
 $StateRoot = Join-Path $TempRoot 'state'
 $FixtureRoot = Join-Path $TempRoot 'fixtures'
-$RemoteHome = Join-Path $TempRoot 'home-github-remote'
 $CloneHome = Join-Path $TempRoot 'home-github-clone'
 $PipVenv = Join-Path $TempRoot 'pip-entrypoint-venv'
 $ManualProbe = Join-Path $EvidenceRoot 'task-15-manual-probe.json'
@@ -217,16 +218,23 @@ function Copy-ProbeArtifacts {
     Remove-Item -LiteralPath $PersistedArtifactRoot -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $PersistedArtifactRoot | Out-Null
     $receipts = @()
+    $persistedDraftPath = $null
     foreach ($property in $Probe.artifact_paths.PSObject.Properties) {
         $source = [string]$property.Value
         $target = Join-Path $PersistedArtifactRoot (Split-Path -Leaf $source)
         Copy-Item -LiteralPath $source -Destination $target -Force
         $property.Value = $target
+        if ($property.Name -eq 'draft_document') {
+            $persistedDraftPath = $target
+        }
         $receipts += [pscustomobject]@{
             name = $property.Name
             source = $source
             evidence_path = $target
         }
+    }
+    if ($persistedDraftPath) {
+        $Probe.template_update.draft_artifact = $persistedDraftPath
     }
     return $receipts
 }
@@ -282,29 +290,86 @@ function Invoke-DirectCopyProof {
 }
 
 function Invoke-GitHubRemoteProof {
-    New-Item -ItemType Directory -Force -Path $RemoteHome | Out-Null
-    $install = Invoke-Hermes `
-        -HermesHomePath $RemoteHome `
-        -Arguments @('plugins', 'install', $RemoteSpec, '--enable') `
-        -LimitSeconds 240
-    $list = Invoke-Hermes `
-        -HermesHomePath $RemoteHome `
-        -Arguments @('plugins', 'list', '--plain', '--no-bundled') `
-        -LimitSeconds 120
-    $remotePluginManifest = Join-Path (Join-Path (Join-Path $RemoteHome 'plugins') $PluginName) 'plugin.yaml'
-    $cliPassed = $install.ExitCode -eq 0 -and $list.ExitCode -eq 0 -and (
-        Test-Path -LiteralPath $remotePluginManifest -PathType Leaf
+    $attempts = @(
+        [pscustomobject]@{
+            name = 'owner_repo_default_branch'
+            spec = $RemoteSpec
+            home = Join-Path $TempRoot 'home-github-owner-repo'
+        },
+        [pscustomobject]@{
+            name = 'owner_repo_subdir_default_branch'
+            spec = $RemoteSubdirSpec
+            home = Join-Path $TempRoot 'home-github-subdir'
+        },
+        [pscustomobject]@{
+            name = 'github_tree_branch_subdir'
+            spec = $RemoteBranchTreeSpec
+            home = Join-Path $TempRoot 'home-github-tree'
+        }
     )
-    if ($cliPassed) {
-        Add-Assertion -Name 'github_remote_cli_install_exit_zero' -Passed $true -Detail $RemoteSpec
-        return [pscustomobject]@{
-            success = $true
-            method = 'hermes plugins install Tinycute00/hermes-office-core-plugin --enable'
-            home = $RemoteHome
+    $receipts = @()
+    foreach ($attempt in $attempts) {
+        New-Item -ItemType Directory -Force -Path $attempt.home | Out-Null
+        $install = Invoke-Hermes `
+            -HermesHomePath $attempt.home `
+            -Arguments @('plugins', 'install', $attempt.spec, '--enable') `
+            -LimitSeconds 240
+        $list = Invoke-Hermes `
+            -HermesHomePath $attempt.home `
+            -Arguments @('plugins', 'list', '--plain', '--no-bundled') `
+            -LimitSeconds 120
+        $remotePluginManifest = Join-Path (Join-Path (Join-Path $attempt.home 'plugins') $PluginName) 'plugin.yaml'
+        $listedOfficeCore = $list.Stdout -match "(^|[\s|])$([regex]::Escape($PluginName))($|[\s|])"
+        $passed = $install.ExitCode -eq 0 -and $list.ExitCode -eq 0 -and $listedOfficeCore -and (
+            Test-Path -LiteralPath $remotePluginManifest -PathType Leaf
+        )
+        Add-Evidence "github_remote_attempt: $($attempt.name)"
+        Add-Evidence "github_remote_attempt_spec: $($attempt.spec)"
+        Add-Evidence "github_remote_attempt_install_exit: $($install.ExitCode)"
+        Add-Evidence "github_remote_attempt_list_exit: $($list.ExitCode)"
+        Add-Evidence "github_remote_attempt_office_core_manifest_exists: $(Test-Path -LiteralPath $remotePluginManifest -PathType Leaf)"
+        Add-Evidence "github_remote_attempt_list_mentions_office_core: $listedOfficeCore"
+        $receipts += [pscustomobject]@{
+            name = $attempt.name
+            spec = $attempt.spec
+            install_exit = $install.ExitCode
+            list_exit = $list.ExitCode
+            office_core_manifest_exists = Test-Path -LiteralPath $remotePluginManifest -PathType Leaf
+            list_mentions_office_core = $listedOfficeCore
+            success = $passed
+        }
+        if ($passed) {
+            Add-Assertion -Name 'github_remote_direct_install_office_core' -Passed $true -Detail $attempt.spec
+            Add-Assertion -Name 'github_remote_direct_list_mentions_office_core' -Passed $true -Detail $attempt.spec
+            Add-Assertion -Name 'github_remote_direct_manifest_exists' -Passed $true -Detail $remotePluginManifest
+            return [pscustomobject]@{
+                success = $true
+                blocked = $false
+                method = "hermes plugins install $($attempt.spec) --enable"
+                home = $attempt.home
+                attempts = $receipts
+            }
         }
     }
 
+    Add-Assertion `
+        -Name 'github_remote_direct_install_office_core' `
+        -Passed $false `
+        -Detail 'owner/repo and supported subdirectory/tree forms did not install/list office-core from the current GitHub default branch'
+
     $clonePath = Join-Path $TempRoot 'github-remote-clone'
+    $branchCloneFallback = Invoke-GitHubBranchCloneFallback -ClonePath $clonePath
+    return [pscustomobject]@{
+        success = $false
+        blocked = $true
+        method = 'blocked: direct GitHub remote install cannot address codex/hermes-office-external-plugin branch with slash while default branch lacks office_core_plugin package'
+        attempts = $receipts
+        branch_clone_file_uri_fallback = $branchCloneFallback
+    }
+}
+
+function Invoke-GitHubBranchCloneFallback {
+    param([string]$ClonePath)
     $clone = Invoke-LoggedProcess `
         -File 'git' `
         -Arguments @(
@@ -314,7 +379,7 @@ function Invoke-GitHubRemoteProof {
             '--branch',
             'codex/hermes-office-external-plugin',
             'https://github.com/Tinycute00/hermes-office-core-plugin.git',
-            $clonePath
+            $ClonePath
         ) `
         -Cwd $TempRoot `
         -LimitSeconds 240
@@ -323,7 +388,7 @@ function Invoke-GitHubRemoteProof {
         -Arguments @(
             'plugins',
             'install',
-            ([System.Uri](Resolve-Path -LiteralPath $clonePath).ProviderPath).AbsoluteUri,
+            ([System.Uri](Resolve-Path -LiteralPath $ClonePath).ProviderPath).AbsoluteUri,
             '--enable'
         ) `
         -LimitSeconds 180
@@ -335,13 +400,12 @@ function Invoke-GitHubRemoteProof {
     $clonePassed = $clone.ExitCode -eq 0 -and $cloneInstall.ExitCode -eq 0 -and $cloneList.ExitCode -eq 0 -and (
         Test-Path -LiteralPath $clonePluginManifest -PathType Leaf
     )
-    Add-Assertion -Name 'github_remote_clone_install_exit_zero' -Passed $clonePassed -Detail $clonePath
+    Add-Assertion -Name 'github_branch_clone_file_uri_fallback_labeled' -Passed $clonePassed -Detail $ClonePath
     return [pscustomobject]@{
         success = $clonePassed
-        method = 'git clone GitHub branch then hermes plugins install file URI'
+        method = 'branch clone fallback only: git clone --branch codex/hermes-office-external-plugin then hermes plugins install file URI'
         home = $CloneHome
-        clone = $clonePath
-        cli_install_exit = $install.ExitCode
+        clone = $ClonePath
     }
 }
 
@@ -458,7 +522,12 @@ try {
                 $persistedPathsExist = $false
             }
         }
+        $draftArtifactPath = [string]$persistedProbe.template_update.draft_artifact
         Add-Assertion -Name 'manual_probe_artifact_paths_persist' -Passed $persistedPathsExist -Detail $PersistedArtifactRoot
+        Add-Assertion `
+            -Name 'manual_probe_template_update_draft_artifact_persists' `
+            -Passed (Test-Path -LiteralPath $draftArtifactPath -PathType Leaf) `
+            -Detail $draftArtifactPath
         Add-Assertion -Name 'manual_probe_direct_copy_success' -Passed ($directCopy.success -eq $true)
         Add-Assertion -Name 'manual_probe_github_remote_success' -Passed ($githubRemote.success -eq $true)
         Add-Assertion -Name 'manual_probe_pip_entrypoint_success' -Passed ($pipEntryPoint.success -eq $true)
