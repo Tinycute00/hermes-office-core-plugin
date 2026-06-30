@@ -8,6 +8,7 @@ param(
 
     [int]$TimeoutSeconds = 60,
 
+    [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$HermesArgs = @()
 )
 
@@ -204,12 +205,23 @@ if (-not [string]::IsNullOrWhiteSpace($env:HERMES_PLUGINS_DEBUG)) {
 }
 
 $uvEnvironment = $null
+$uv = Get-Command uv -ErrorAction SilentlyContinue
 $installedHermes = Get-Command hermes -ErrorAction SilentlyContinue
+$installedLauncherBroken = $false
 if ($installedHermes) {
     Add-Evidence "hermes_cli_source: installed:$($installedHermes.Source)"
     $result = Invoke-BoundedProcess -File $installedHermes.Source -Arguments $HermesArgs -Cwd (Get-Location).ProviderPath -Environment $envVars
-} else {
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    $installedLauncherBroken = $result.ExitCode -ne 0 -and (
+        $result.Stderr -match 'not recognized' -or
+        $result.Stderr -match 'No such file' -or
+        $result.Stderr -match 'cannot find'
+    )
+    if ($installedLauncherBroken) {
+        Add-Evidence 'hermes_cli_source_fallback_reason: installed launcher target unavailable'
+    }
+}
+
+if ((-not $installedHermes) -or $installedLauncherBroken) {
     if (-not $uv) {
         Add-Evidence 'hermes_cli_source: unavailable'
         Add-Evidence 'assertion: fallback_uv_available=FAIL - uv command not found'

@@ -205,7 +205,7 @@ function Assert-LastCommandOutput {
         [string]$Name,
         [string]$ExpectedText
     )
-    $lines = @(Get-Content -LiteralPath $Evidence)
+    $lines = @(Get-EvidenceLines)
     $start = -1
     for ($i = $lines.Count - 1; $i -ge 0; $i--) {
         if ($lines[$i].StartsWith('command: ', [System.StringComparison]::Ordinal)) {
@@ -219,6 +219,17 @@ function Assert-LastCommandOutput {
     }
     $recent = ($lines[$start..($lines.Count - 1)] -join "`n")
     Add-Assertion -Name $Name -Passed ($recent -match [regex]::Escape($ExpectedText)) -Detail $ExpectedText
+}
+
+function Get-EvidenceLines {
+    for ($attempt = 1; $attempt -le 10; $attempt++) {
+        try {
+            return @(Get-Content -LiteralPath $Evidence)
+        } catch [System.IO.IOException] {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    return @(Get-Content -LiteralPath $Evidence)
 }
 
 function ConvertTo-FileUri {
