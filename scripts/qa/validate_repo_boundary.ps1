@@ -37,7 +37,7 @@ $Failures = New-Object System.Collections.Generic.List[string]
 
 function Add-Evidence {
     param([string]$Line)
-    Write-Output $Line
+    Write-Host $Line
     if (-not [string]::IsNullOrWhiteSpace($Evidence)) {
         Add-Content -LiteralPath $Evidence -Value $Line -Encoding UTF8
     }

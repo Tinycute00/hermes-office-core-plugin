@@ -1,0 +1,5 @@
+name: office-core
+version: 0.1.0
+display_name: Office Core
+description: Standalone Hermes Agent office workflow plugin.
+entrypoint: __init__.py
