@@ -14,6 +14,7 @@ param(
     [switch]$KeepTemp
 )
 
+# allow: SIZE_OK - Bounded QA/evidence harness; not plugin runtime behavior.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

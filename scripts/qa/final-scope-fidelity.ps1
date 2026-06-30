@@ -7,6 +7,7 @@ param(
     [string]$Evidence
 )
 
+# allow: SIZE_OK - Bounded QA/evidence harness; not plugin runtime behavior.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -220,6 +221,39 @@ function Test-FileContains {
     return $content -match $Pattern
 }
 
+function Test-EvidenceReferenceToken {
+    param([string]$Token)
+    $normalizedToken = $Token.Trim() -replace '/', '\'
+    if ($normalizedToken -match '^[A-Za-z]:\\') {
+        return $false
+    }
+    if ($normalizedToken -match '^(https?://|app://)') {
+        return $false
+    }
+    if ($normalizedToken -notmatch '\.(txt|json|md|jsonl|py|toml|whl|tar\.gz)$') {
+        return $false
+    }
+    return $normalizedToken -match '^(task-\d+|source-boundary-|final-quality-|gate-review-)'
+}
+
+function Get-RollupEvidenceReferences {
+    param([string]$Text)
+    $references = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line.TrimStart().StartsWith('```')) {
+            continue
+        }
+        foreach ($match in [regex]::Matches($line, '(?<!`)`([^`\r\n]+)`(?!`)')) {
+            $token = $match.Groups[1].Value.Trim()
+            if (Test-EvidenceReferenceToken -Token $token) {
+                $normalizedToken = $token -replace '/', '\'
+                $references.Add($normalizedToken) | Out-Null
+            }
+        }
+    }
+    return @($references | Sort-Object)
+}
+
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Evidence) | Out-Null
 Set-Content -LiteralPath $Evidence -Encoding UTF8 -Value @(
     'final-scope-fidelity',
@@ -305,6 +339,16 @@ if (Test-Path -LiteralPath $rollupPath -PathType Leaf) {
     foreach ($relativeEvidence in $RequiredEvidenceFiles) {
         Add-Assertion -Name ('rollup_mentions_' + ($relativeEvidence -replace '[^A-Za-z0-9]', '_')) -Passed ($rollupText.Contains($relativeEvidence)) -Detail $relativeEvidence
     }
+    $rollupEvidenceReferences = @(Get-RollupEvidenceReferences -Text $rollupText)
+    Add-Assertion -Name 'rollup_evidence_reference_count_nonzero' -Passed ($rollupEvidenceReferences.Count -gt 0) -Detail ("count=$($rollupEvidenceReferences.Count)")
+    foreach ($relativeEvidence in $rollupEvidenceReferences) {
+        $path = Join-Path $evidenceRoot $relativeEvidence
+        $exists = Test-Path -LiteralPath $path -PathType Leaf
+        Add-Assertion -Name ('rollup_reference_exists_' + ($relativeEvidence -replace '[^A-Za-z0-9]', '_')) -Passed $exists -Detail $relativeEvidence
+        if ($exists) {
+            Add-Assertion -Name ('rollup_reference_nonempty_' + ($relativeEvidence -replace '[^A-Za-z0-9]', '_')) -Passed ((Get-Item -LiteralPath $path).Length -gt 0) -Detail $relativeEvidence
+        }
+    }
 }
 
 $repoEvidence = Join-Path $evidenceRoot 'task-02-repo.txt'
@@ -367,10 +411,10 @@ Add-Evidence ''
 Add-Evidence 'adversarial_classes:'
 Add-Evidence 'stale_state: git branch/upstream/remote and GitHub metadata are read live during this run'
 Add-Evidence 'dirty_worktree: git status is captured in the evidence output'
-Add-Evidence 'misleading_success_output: exact files, parsed JSON fields, and required proof strings are asserted'
+Add-Evidence 'misleading_success_output: exact files, rollup references, parsed JSON fields, and required proof strings are asserted'
 Add-Evidence 'overfit_slop: checks cover repo boundary, install docs, evidence files, Linear proof, GitHub metadata, and external-write policy'
 Add-Evidence 'prompt_injection: Linear proof and evidence logs are treated only as data'
-Add-Evidence 'malformed_input: missing required evidence files fail nonzero'
+Add-Evidence 'malformed_input: missing required or rollup-referenced evidence files fail nonzero'
 Add-Evidence 'hung_or_long_commands: external commands use bounded process timeouts'
 
 if ($Failures.Count -gt 0) {
