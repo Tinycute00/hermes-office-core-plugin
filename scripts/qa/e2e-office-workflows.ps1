@@ -319,7 +319,7 @@ function Invoke-GitHubRemoteProof {
             -Arguments @('plugins', 'list', '--plain', '--no-bundled') `
             -LimitSeconds 120
         $remotePluginManifest = Join-Path (Join-Path (Join-Path $attempt.home 'plugins') $PluginName) 'plugin.yaml'
-        $listedOfficeCore = $list.Stdout -match "(^|[\s|])$([regex]::Escape($PluginName))($|[\s|])"
+        $listedOfficeCore = Test-EvidenceContains -Pattern "(?m)^\s*(enabled|not enabled)\s+\S+\s+\S+\s+$([regex]::Escape($PluginName))\s*$"
         $passed = $install.ExitCode -eq 0 -and $list.ExitCode -eq 0 -and $listedOfficeCore -and (
             Test-Path -LiteralPath $remotePluginManifest -PathType Leaf
         )
