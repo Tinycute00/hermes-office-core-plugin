@@ -51,7 +51,10 @@ $RequiredEvidenceFiles = @(
     'task-15-e2e-remote-merge-ambiguous.txt',
     'task-15-final-install-e2e-remote-merge.txt',
     'task-15-remote-install-resolution.txt',
-    'task-16-linear-comments.json'
+    'task-16-linear-comments.json',
+    'task-16-code-review.txt',
+    'task-16-manual-qa-matrix.md',
+    'task-16-notepad.md'
 )
 
 $Assertions = New-Object System.Collections.Generic.List[string]
@@ -256,6 +259,21 @@ Add-Assertion -Name 'expected_branch' -Passed (($branch.ExitCode -eq 0) -and ($c
 $upstream = Invoke-LoggedProcess -File 'git' -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}') -Cwd $resolvedRepo
 $currentUpstream = $upstream.Stdout.Trim()
 Add-Assertion -Name 'expected_upstream' -Passed (($upstream.ExitCode -eq 0) -and ($currentUpstream -eq $ExpectedUpstream)) -Detail $currentUpstream
+
+$fetchUpstream = Invoke-LoggedProcess -File 'git' -Arguments @('fetch', 'origin', $ExpectedBranch) -Cwd $resolvedRepo
+Add-Assertion -Name 'fetch_expected_upstream_succeeded' -Passed ($fetchUpstream.ExitCode -eq 0) -Detail "exit=$($fetchUpstream.ExitCode)"
+
+$localHead = Invoke-LoggedProcess -File 'git' -Arguments @('rev-parse', 'HEAD') -Cwd $resolvedRepo
+$localHeadSha = $localHead.Stdout.Trim()
+Add-Assertion -Name 'local_head_resolved' -Passed (($localHead.ExitCode -eq 0) -and ($localHeadSha -match '^[0-9a-f]{40}$')) -Detail $localHeadSha
+
+$upstreamHead = Invoke-LoggedProcess -File 'git' -Arguments @('rev-parse', '@{u}') -Cwd $resolvedRepo
+$upstreamHeadSha = $upstreamHead.Stdout.Trim()
+Add-Assertion -Name 'upstream_head_resolved' -Passed (($upstreamHead.ExitCode -eq 0) -and ($upstreamHeadSha -match '^[0-9a-f]{40}$')) -Detail $upstreamHeadSha
+
+$headInUpstream = Invoke-LoggedProcess -File 'git' -Arguments @('merge-base', '--is-ancestor', 'HEAD', '@{u}') -Cwd $resolvedRepo
+Add-Assertion -Name 'local_head_present_in_upstream_history' -Passed ($headInUpstream.ExitCode -eq 0) -Detail "exit=$($headInUpstream.ExitCode)"
+Add-Assertion -Name 'local_head_equals_upstream' -Passed (($localHead.ExitCode -eq 0) -and ($upstreamHead.ExitCode -eq 0) -and ($localHeadSha -eq $upstreamHeadSha)) -Detail "HEAD=$localHeadSha upstream=$upstreamHeadSha"
 
 $remote = Invoke-LoggedProcess -File 'git' -Arguments @('remote', '-v') -Cwd $resolvedRepo
 $remoteText = $remote.Stdout
