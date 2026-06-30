@@ -188,7 +188,7 @@ function Invoke-Hermes {
         Remove-Item Env:\HERMES_PLUGINS_DEBUG -ErrorAction SilentlyContinue
     }
     try {
-        & $Runner -Evidence $Evidence -HermesHome $HermesHomePath -TimeoutSeconds $CliTimeoutSeconds -HermesArgs $Arguments
+        $null = & $Runner -Evidence $Evidence -HermesHome $HermesHomePath -TimeoutSeconds $CliTimeoutSeconds -HermesArgs $Arguments
         $exitCode = $LASTEXITCODE
     } finally {
         if ($null -eq $previousDebug) {

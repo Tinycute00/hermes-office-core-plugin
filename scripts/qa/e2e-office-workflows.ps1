@@ -189,10 +189,12 @@ function Test-HasProperty {
     return $null -ne $Value.PSObject.Properties[$Name]
 }
 
-function Test-EvidenceContains {
-    param([string]$Pattern)
-    $text = Get-Content -LiteralPath $Evidence -Raw
-    return $text -match $Pattern
+function Test-TextContains {
+    param(
+        [string]$Text,
+        [string]$Pattern
+    )
+    return $Text -match $Pattern
 }
 
 function Add-InstallProofs {
@@ -319,7 +321,9 @@ function Invoke-GitHubRemoteProof {
             -Arguments @('plugins', 'list', '--plain', '--no-bundled') `
             -LimitSeconds 120
         $remotePluginManifest = Join-Path (Join-Path (Join-Path $attempt.home 'plugins') $PluginName) 'plugin.yaml'
-        $listedOfficeCore = Test-EvidenceContains -Pattern "(?m)^\s*(enabled|not enabled)\s+\S+\s+\S+\s+$([regex]::Escape($PluginName))\s*$"
+        $listedOfficeCore = Test-TextContains `
+            -Text $list.Stdout `
+            -Pattern "(?m)^\s*(enabled|not enabled)\s+\S+\s+\S+\s+$([regex]::Escape($PluginName))\s*$"
         $passed = $install.ExitCode -eq 0 -and $list.ExitCode -eq 0 -and $listedOfficeCore -and (
             Test-Path -LiteralPath $remotePluginManifest -PathType Leaf
         )
