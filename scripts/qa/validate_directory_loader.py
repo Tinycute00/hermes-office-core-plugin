@@ -97,6 +97,11 @@ def strict_loader_child_code() -> str:
         assert str(plugin_dir) not in sys.path
         assert importlib.util.find_spec("office_core_plugin") is None
 
+        stale_package = types.ModuleType("office_core_plugin")
+        stale_package.__file__ = "/tmp/site-packages/office_core_plugin/__init__.py"
+        stale_package.register = lambda ctx: None
+        sys.modules["office_core_plugin"] = stale_package
+
         class FakeHermesContext:
             def __init__(self) -> None:
                 self.tools = {}
@@ -146,6 +151,8 @@ def strict_loader_child_code() -> str:
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         assert callable(module.register)
+        loaded_package_file = Path(sys.modules["office_core_plugin"].__file__).resolve()
+        assert str(loaded_package_file).startswith(str(plugin_dir))
 
         ctx = FakeHermesContext()
         module.register(ctx)
@@ -157,6 +164,7 @@ def strict_loader_child_code() -> str:
 
         print("repo_root_not_on_sys_path=PASS")
         print("plugin_dir_not_on_sys_path=PASS")
+        print("loaded_package_from_plugin_dir=PASS")
         print("register_callable=PASS")
         print("register_invoked=PASS")
         print("registered_tools=PASS")

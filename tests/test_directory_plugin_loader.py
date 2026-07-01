@@ -25,6 +25,7 @@ def test_directory_plugin_loader_registers_without_sys_path_leakage(
     assert result.returncode == 0, result.stderr
     assert result.stdout == json.dumps({
         "plugin_dir_not_on_sys_path": True,
+        "loaded_package_from_plugin_dir": True,
         "register_callable": True,
         "registered_commands": ["office_status"],
         "registered_hooks": ["post_tool_call"],
@@ -94,6 +95,11 @@ def _run_strict_loader(
         assert str(plugin_dir) not in sys.path
         assert importlib.util.find_spec("office_core_plugin") is None
 
+        stale_package = types.ModuleType("office_core_plugin")
+        stale_package.__file__ = "/tmp/site-packages/office_core_plugin/__init__.py"
+        stale_package.register = lambda ctx: None
+        sys.modules["office_core_plugin"] = stale_package
+
         class FakeHermesContext:
             def __init__(self) -> None:
                 self.tools = {}
@@ -143,6 +149,8 @@ def _run_strict_loader(
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
         assert callable(module.register)
+        loaded_package_file = Path(sys.modules["office_core_plugin"].__file__).resolve()
+        assert str(loaded_package_file).startswith(str(plugin_dir))
 
         ctx = FakeHermesContext()
         module.register(ctx)
@@ -150,6 +158,9 @@ def _run_strict_loader(
             json.dumps(
                 {
                     "plugin_dir_not_on_sys_path": str(plugin_dir) not in sys.path,
+                    "loaded_package_from_plugin_dir": str(loaded_package_file).startswith(
+                        str(plugin_dir),
+                    ),
                     "register_callable": callable(module.register),
                     "registered_commands": sorted(ctx.commands),
                     "registered_hooks": sorted(ctx.hooks),
