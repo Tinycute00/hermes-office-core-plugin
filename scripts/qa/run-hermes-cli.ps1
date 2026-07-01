@@ -253,6 +253,10 @@ if ($uvEnvironment) {
     Add-Evidence ('assertion: uv_environment_removed=' + ($(if (Test-Path -LiteralPath $uvEnvironment) { 'FAIL' } else { 'PASS' })))
 }
 
+if (-not [string]::IsNullOrEmpty($result.Stdout)) {
+    Write-Output $result.Stdout.TrimEnd()
+}
+
 if (-not $statusUnchanged) {
     exit 70
 }
