@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, Protocol, TypeAlias, TypedDict
 
-from office_core_plugin.redaction import REDACTED, redact_json, redact_text
+from .redaction import REDACTED, redact_json, redact_text
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
