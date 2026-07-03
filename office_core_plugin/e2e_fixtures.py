@@ -4,6 +4,12 @@ from typing import TYPE_CHECKING, Final
 
 from .bridge_planner import BridgeRequest, BridgeTarget, plan_bridge_handoff
 from .data_maps import DataDictionary, SourceSelectionResult
+from .e2e_office_workflow_fixtures import (
+    approved_reusable_data_to_deck,
+    external_send_preview,
+    messy_spreadsheet_data_package,
+    monthly_report_template_update,
+)
 from .local_files_adapter import CandidateDiscoveryConfig, discover_local_file_candidates
 from .operation_policy import (
     ConfirmationState,
@@ -24,6 +30,26 @@ from .registry_models import (
     SourceRecord,
     TemplateIdentity,
 )
+
+__all__ = [
+    "ambiguous_source_selection",
+    "approved_reusable_data_to_deck",
+    "bridge_plan",
+    "data_dictionary",
+    "denied_operation",
+    "external_send_preview",
+    "inventory_row",
+    "local_file_search",
+    "messy_spreadsheet_data_package",
+    "monthly_report_template_update",
+    "policy_provenance",
+    "prepare_fixture_files",
+    "provenance_record",
+    "read_operation",
+    "selection_payload",
+    "source_record",
+    "template_fixture",
+]
 
 if TYPE_CHECKING:
     from pathlib import Path
