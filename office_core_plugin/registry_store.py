@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self
 
 from .registry_base import RegistryError, objects
@@ -11,8 +10,11 @@ from .registry_core import (
     SourceRecord,
     TemplateIdentity,
 )
+from .safe_path import validate_state_root
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .handler_contract import JSONObject
 
 REGISTRY_FILENAME: Final = "template_registry.json"
@@ -53,7 +55,7 @@ class TemplateRegistryStore:
             field = "state_root"
             detail = "explicit plugin-managed path required"
             raise RegistryError(field, detail)
-        self._path = Path(state_root) / REGISTRY_FILENAME
+        self._path = validate_state_root(state_root) / REGISTRY_FILENAME
 
     def load(self) -> TemplateRegistry:
         if not self._path.exists():
