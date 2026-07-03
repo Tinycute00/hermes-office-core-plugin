@@ -63,7 +63,13 @@ def test_available_document_target_returns_inventory_declared_invocation() -> No
         "capability": "Word/docx",
         "status": "available",
         "invocation_path": "ocr-and-documents guidance plus local file tooling",
+        "fallback": "manual document handoff",
         "confidence": 0.86,
+        "mutation_allowed": False,
+        "required_owner_confirmation": {
+            "state": "not_required",
+            "reason": "read-only low-risk handoff",
+        },
     }
     assert plan["inputs"] == {"document_id": "invoice-template"}
     assert plan["fallback"]["state"] == "not_needed"
@@ -242,6 +248,28 @@ def test_high_risk_write_or_send_handoffs_require_confirmation() -> None:
     assert github_plan["requires_confirmation"] is True
 
 
+def test_upload_handoff_uses_shared_high_impact_policy() -> None:
+    # Given: available document inventory for an upload-style operation.
+    inventory = [
+        _inventory_row("Word/docx", "available", "document bridge", "manual document handoff"),
+    ]
+
+    # When: the planner evaluates an upload handoff.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target=BridgeTarget.DOCUMENT,
+            inventory=inventory,
+            inputs={"path": "report.docx"},
+            operation="upload report",
+        ),
+    ).to_dict()
+
+    # Then: upload is high impact and requires confirmation even when available.
+    assert plan["available"] is True
+    assert plan["risk"] == "high"
+    assert plan["requires_confirmation"] is True
+
+
 def test_filesystem_target_uses_local_file_adapter_only_when_inventory_says_available() -> None:
     # Given: available filesystem inventory and a second fixture without that row.
     available_inventory = [
@@ -305,3 +333,110 @@ def test_missing_capability_does_not_invent_unavailable_skill_names() -> None:
     assert plan["invocation"] is None
     assert "devops/kanban-orchestrator" not in raw_json
     assert "kanban_create" not in raw_json
+
+
+def test_characterizes_current_inventory_linear_as_missing_fallback() -> None:
+    # Given: the current inventory marks Linear as missing.
+    inventory = [
+        _inventory_row(
+            "Linear",
+            "missing",
+            "No target Hermes invocation path is currently proven.",
+            "Create owner-confirmation items or draft Linear updates for manual posting.",
+        ),
+    ]
+
+    # When: the planner evaluates a Linear handoff.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target=BridgeTarget.LINEAR,
+            inventory=inventory,
+            inputs={"issue": "LIN-123"},
+            operation="create Linear issue",
+        ),
+    ).to_dict()
+
+    # Then: current behavior fails closed with owner confirmation and no invocation.
+    assert plan["target"] == "linear"
+    assert plan["available"] is False
+    assert plan["invocation"] is None
+    assert plan["fallback"]["state"] == OWNER_CONFIRMATION_FALLBACK
+    assert plan["fallback"]["owner_confirmation"]["state"] == "pending"
+
+
+def test_unknown_linear_string_fails_closed_with_manual_fallback() -> None:
+    # Given: no inventory proof for a misleading unknown Linear-like target string.
+    inventory = [
+        _inventory_row("Linear", "missing", "No proven path", "manual Linear handoff"),
+    ]
+
+    # When: the requested target is not a supported planner enum value.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target="linear-live-api",
+            inventory=inventory,
+            inputs={"issue": "LIN-999"},
+            operation="create Linear issue",
+        ),
+    ).to_dict()
+
+    # Then: the planner does not treat the unknown capability as success.
+    assert plan["target"] == "unknown"
+    assert plan["available"] is False
+    assert plan["invocation"] is None
+    assert plan["fallback"]["state"] == OWNER_CONFIRMATION_FALLBACK
+    assert plan["fallback"]["owner_confirmation"]["state"] == "pending"
+
+
+def test_high_impact_external_profile_is_mutation_locked_and_owner_confirmed() -> None:
+    # Given: a high-impact external GitHub profile marked installed.
+    inventory = [
+        _inventory_row("GitHub", "installed", "github bridge", "manual GitHub draft"),
+    ]
+
+    # When: the planner evaluates a send/write handoff.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target=BridgeTarget.GITHUB_MCP,
+            inventory=inventory,
+            inputs={"issue": "release note"},
+            operation="send issue update",
+        ),
+    ).to_dict()
+
+    # Then: the deterministic profile cannot mutate and requires owner confirmation.
+    assert plan["available"] is True
+    assert plan["invocation"]["mutation_allowed"] is False
+    assert plan["invocation"]["required_owner_confirmation"]["state"] == "required"
+    assert plan["requires_confirmation"] is True
+
+
+def test_available_document_profile_uses_required_profile_shape() -> None:
+    # Given: an available document profile.
+    inventory = [
+        _inventory_row("Word/docx", "available", "document bridge", "manual document handoff"),
+    ]
+
+    # When: a document handoff is planned.
+    plan = plan_bridge_handoff(
+        BridgeRequest(
+            target=BridgeTarget.DOCUMENT,
+            inventory=inventory,
+            inputs={"document_id": "template-update-draft"},
+            operation="read document",
+        ),
+    ).to_dict()
+
+    # Then: the invocation is a complete deterministic bridge profile.
+    assert plan["invocation"] == {
+        "capability": "Word/docx",
+        "status": "available",
+        "invocation_path": "document bridge",
+        "fallback": "manual document handoff",
+        "confidence": 0.86,
+        "mutation_allowed": False,
+        "required_owner_confirmation": {
+            "state": "not_required",
+            "reason": "read-only low-risk handoff",
+        },
+    }

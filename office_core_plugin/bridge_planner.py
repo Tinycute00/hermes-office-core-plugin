@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from enum import StrEnum, unique
 from typing import TYPE_CHECKING, Final
 
+from .bridge_profiles import (
+    InventoryCapability,
+    find_inventory_capability,
+    load_bridge_profile_inventory,
+    text_field,
+)
+from .operation_classifier import classify_operation
 from .operation_policy import RiskLevel
 from .redaction import redact_json, redact_text
 
@@ -12,10 +19,6 @@ if TYPE_CHECKING:
 
 OWNER_CONFIRMATION_FALLBACK: Final = "owner_confirmation_or_manual_task"
 LOCAL_FILE_ADAPTER: Final = "local_files_adapter"
-AVAILABLE_STATUSES: Final = frozenset(("available", "installed"))
-HIGH_RISK_TERMS: Final = frozenset(
-    ("create", "delete", "email", "forward", "remove", "save", "send", "update", "write"),
-)
 
 
 @unique
@@ -45,22 +48,9 @@ TARGET_CAPABILITIES: Final = {
 
 
 @dataclass(frozen=True, slots=True)
-class InventoryCapability:
-    capability: str
-    status: str
-    invocation_path: str
-    fallback: str
-    confidence: float
-
-    @property
-    def available(self) -> bool:
-        return self.status.lower() in AVAILABLE_STATUSES
-
-
-@dataclass(frozen=True, slots=True)
 class BridgeRequest:
     target: BridgeTarget | str
-    inventory: JSONValue
+    inventory: JSONValue | None = None
     inputs: JSONObject | None = None
     operation: str = ""
 
@@ -70,7 +60,10 @@ class BridgeInvocation:
     capability: str
     status: str
     invocation_path: str
+    fallback: str
     confidence: float
+    mutation_allowed: bool
+    required_owner_confirmation: JSONObject
     adapter: str | None = None
 
     def to_dict(self) -> JSONObject:
@@ -78,7 +71,10 @@ class BridgeInvocation:
             "capability": redact_text(self.capability),
             "status": redact_text(self.status),
             "invocation_path": redact_text(self.invocation_path),
+            "fallback": redact_text(self.fallback),
             "confidence": self.confidence,
+            "mutation_allowed": self.mutation_allowed,
+            "required_owner_confirmation": redact_json(self.required_owner_confirmation),
         }
         if self.adapter is not None:
             payload["adapter"] = self.adapter
@@ -129,6 +125,7 @@ def plan_bridge_handoff(request: BridgeRequest) -> BridgePlan:
     parsed_target = _parse_target(request.target)
     safe_inputs = request.inputs or {}
     risk = _risk_for_operation(request.operation)
+    inventory = load_bridge_profile_inventory() if request.inventory is None else request.inventory
     if parsed_target is None:
         return BridgePlan(
             target="unknown",
@@ -145,7 +142,7 @@ def plan_bridge_handoff(request: BridgeRequest) -> BridgePlan:
         )
 
     capability = _target_capability(parsed_target)
-    row = _find_inventory_capability(request.inventory, capability)
+    row = find_inventory_capability(inventory, capability)
     if row is None:
         return _missing_plan(parsed_target, safe_inputs, risk, "inventory capability absent")
     if not row.available:
@@ -154,7 +151,7 @@ def plan_bridge_handoff(request: BridgeRequest) -> BridgePlan:
     return BridgePlan(
         target=parsed_target.value,
         available=True,
-        invocation=_invocation_for(parsed_target, row),
+        invocation=_invocation_for(parsed_target, row, risk),
         inputs=safe_inputs,
         fallback=BridgeFallback(
             state="not_needed",
@@ -179,64 +176,35 @@ def _target_capability(target: BridgeTarget) -> str:
     return TARGET_CAPABILITIES[target]
 
 
-def _find_inventory_capability(
-    inventory: JSONValue,
-    capability: str,
-) -> InventoryCapability | None:
-    if not isinstance(inventory, list):
-        return None
-    for item in inventory:
-        row = _parse_inventory_row(item)
-        if row is not None and row.capability == capability:
-            return row
-    return None
-
-
-def _parse_inventory_row(item: JSONValue) -> InventoryCapability | None:
-    if not isinstance(item, dict):
-        return None
-    capability = _text_field(item, "capability")
-    status = _text_field(item, "status")
-    invocation_path = _text_field(item, "invocation_path")
-    fallback = _text_field(item, "fallback")
-    confidence = _confidence_field(item)
-    if None in (capability, status, invocation_path, fallback, confidence):
-        return None
-    return InventoryCapability(
-        capability=capability,
-        status=status,
-        invocation_path=invocation_path,
-        fallback=fallback,
-        confidence=confidence,
-    )
-
-
-def _text_field(item: JSONObject, key: str) -> str | None:
-    value = item.get(key)
-    if not isinstance(value, str) or not value.strip():
-        return None
-    return value
-
-
-def _confidence_field(item: JSONObject) -> float | None:
-    value = item.get("confidence")
-    if isinstance(value, bool) or not isinstance(value, (float, int)):
-        return None
-    score = float(value)
-    if 0.0 <= score <= 1.0:
-        return score
-    return None
-
-
-def _invocation_for(target: BridgeTarget, row: InventoryCapability) -> BridgeInvocation:
+def _invocation_for(
+    target: BridgeTarget,
+    row: InventoryCapability,
+    risk: RiskLevel,
+) -> BridgeInvocation:
     adapter = LOCAL_FILE_ADAPTER if target is BridgeTarget.FILESYSTEM else None
     return BridgeInvocation(
         capability=row.capability,
         status=row.status,
         invocation_path=row.invocation_path,
+        fallback=row.fallback,
         confidence=row.confidence,
+        mutation_allowed=False,
+        required_owner_confirmation=_required_confirmation_for(row, risk),
         adapter=adapter,
     )
+
+
+def _required_confirmation_for(row: InventoryCapability, risk: RiskLevel) -> JSONObject:
+    if risk is RiskLevel.HIGH:
+        return {
+            "state": "required",
+            "reason": "high-impact external handoff requires owner confirmation",
+        }
+    state = text_field(row.required_owner_confirmation, "state")
+    reason = text_field(row.required_owner_confirmation, "reason")
+    if state == "required":
+        return {"state": state, "reason": reason or "owner confirmation required"}
+    return {"state": "not_required", "reason": "read-only low-risk handoff"}
 
 
 def _missing_plan(
@@ -275,7 +243,4 @@ def _owner_confirmation_fallback(target: str, reason: str, path: str) -> BridgeF
 
 
 def _risk_for_operation(operation: str) -> RiskLevel:
-    lowered = operation.lower()
-    if any(term in lowered for term in HIGH_RISK_TERMS):
-        return RiskLevel.HIGH
-    return RiskLevel.LOW
+    return classify_operation(operation).risk_level
