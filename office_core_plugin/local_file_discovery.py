@@ -12,6 +12,7 @@ from .local_file_candidates import (
     MonotonicClock,
     build_candidate,
 )
+from .safe_path import resolve_and_check_within_root
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,12 +145,8 @@ def _scan_item(state: ScanState, item: WorkItem) -> None:
     if state.budget.expired():
         _timeout(state)
         return
-    try:
-        resolved = item.path.resolve(strict=True)
-    except OSError:
-        _deny(state.denials, state.audit, str(item.path), "path_unavailable")
-        return
-    if not _within_roots(resolved, state.roots):
+    resolved = resolve_and_check_within_root(item.path, state.roots)
+    if resolved is None:
         _deny(state.denials, state.audit, str(item.path), item.escape_reason)
         return
     if item.depth > state.config.max_depth:
