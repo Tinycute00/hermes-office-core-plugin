@@ -29,7 +29,9 @@ REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
         "invocation_path",
         "fallback",
         "confidence",
+        "mutation_allowed",
         "notes",
+        "required_owner_confirmation",
     },
 )
 REQUIRED_CAPABILITIES: Final[frozenset[str]] = frozenset(
@@ -57,7 +59,9 @@ class InventoryRow(TypedDict):
     invocation_path: str
     fallback: str
     confidence: float
+    mutation_allowed: bool
     notes: str
+    required_owner_confirmation: dict[str, JsonValue]
 
 
 class InventoryContractError(RuntimeError):
@@ -99,6 +103,28 @@ def require_confidence(row: Mapping[str, JsonValue]) -> float:
             fail(f"{require_text(row, 'capability')}: confidence must be numeric")
 
 
+def require_mutation_lock(row: Mapping[str, JsonValue]) -> bool:
+    value = row.get("mutation_allowed")
+    match value:
+        case False:
+            return False
+        case _:
+            fail(f"{require_text(row, 'capability')}: mutation_allowed must be false")
+
+
+def require_owner_confirmation(row: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    value = row.get("required_owner_confirmation")
+    match value:
+        case {"state": str() as state, "reason": str() as reason} if (
+            state.strip() and reason.strip()
+        ):
+            if state not in {"required", "required_for_mutation"}:
+                fail(f"{require_text(row, 'capability')}: owner confirmation must fail closed")
+            return {"state": state, "reason": reason}
+        case _:
+            fail(f"{require_text(row, 'capability')}: owner confirmation rules must be present")
+
+
 def parse_row(raw_row: Mapping[str, JsonValue]) -> InventoryRow:
     extra = frozenset(raw_row) - REQUIRED_FIELDS
     missing = REQUIRED_FIELDS - frozenset(raw_row)
@@ -112,7 +138,9 @@ def parse_row(raw_row: Mapping[str, JsonValue]) -> InventoryRow:
         invocation_path=require_text(raw_row, "invocation_path"),
         fallback=require_text(raw_row, "fallback"),
         confidence=require_confidence(raw_row),
+        mutation_allowed=require_mutation_lock(raw_row),
         notes=require_text(raw_row, "notes"),
+        required_owner_confirmation=require_owner_confirmation(raw_row),
     )
     match row["status"]:
         case "missing" | "unknown":
