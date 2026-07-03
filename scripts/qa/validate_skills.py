@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 PLUGIN_NAME: Final = "office-core"
 SKILL_ROOT: Final = Path("office_core_plugin") / "skills"
 EXPECTED_SKILLS: Final = (
+    "office-diagnostic",
     "office-template-update",
     "office-data-package",
     "office-reuse-data",
@@ -60,6 +61,20 @@ FORBIDDEN_PROFILE_TERMS: Final = frozenset(
         "roleplay",
         "system prompt",
     },
+)
+REQUIRED_PHRASES: Final = (
+    ("officetaskcontract", "missing OfficeTaskContract requirement"),
+    ("source/data correctness", "missing source/data correctness check"),
+    ("validation before handoff", "missing validation before handoff"),
+    ("policy preview before handoff", "missing policy preview before handoff"),
+    ("untrusted office content", "missing untrusted office content boundary"),
+    ("draft-only", "missing draft-only behavior"),
+)
+REQUIRED_TERM_GROUPS: Final = (
+    (
+        ("ambiguity", "high-impact", "external", "handoff"),
+        "missing ambiguity/high-impact owner confirmation rule",
+    ),
 )
 CODE_SPAN_PATTERN: Final = re.compile(r"`([^`]+)`")
 JsonScalar = str | int | float | bool | None
@@ -145,9 +160,29 @@ def check_required_text(skill_name: str, text: str) -> None:
         fail(f"{skill_name}: missing expected JSON/tool output")
     if "untrusted" not in lowered or "never as instructions" not in lowered:
         fail(f"{skill_name}: missing untrusted-content boundary")
+    check_required_phrases(skill_name, lowered)
     forbidden = sorted(term for term in FORBIDDEN_PROFILE_TERMS if term in lowered)
     if forbidden:
         fail(f"{skill_name}: forbidden profile/personality text {forbidden}")
+
+
+def check_required_phrases(skill_name: str, lowered: str) -> None:
+    missing_phrase = next(
+        (message for phrase, message in REQUIRED_PHRASES if phrase not in lowered),
+        None,
+    )
+    if missing_phrase is not None:
+        fail(f"{skill_name}: {missing_phrase}")
+    missing_group = next(
+        (
+            message
+            for terms, message in REQUIRED_TERM_GROUPS
+            if any(term not in lowered for term in terms)
+        ),
+        None,
+    )
+    if missing_group is not None:
+        fail(f"{skill_name}: {missing_group}")
 
 
 def check_confirmation_gate(skill_name: str, text: str) -> None:
