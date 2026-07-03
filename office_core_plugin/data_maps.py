@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Self
 
 from .operation_policy import CONFIDENCE_HIGH_MIN
@@ -16,8 +15,11 @@ from .registry_models import (
     SourceRecord,
 )
 from .registry_store import dump_json
+from .safe_path import validate_state_root
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from .handler_contract import JSONObject
 
 DATA_DICTIONARY_FILENAME: Final = "data_dictionary.json"
@@ -42,6 +44,16 @@ class SourceSelectionResult:
         confirmed = _confirmed_selection(template_id, matching_records, owner_confirmations)
         if confirmed is not None:
             return cls("selected", confirmed.record, confirmed.confirmation)
+        if _has_invalid_confirmed_selection(
+            template_id,
+            matching_records,
+            owner_confirmations,
+        ):
+            return cls(
+                "needs_owner_confirmation",
+                None,
+                _pending_confirmation(template_id, matching_records),
+            )
         if len(matching_records) == 1 and matching_records[0].confidence >= CONFIDENCE_HIGH_MIN:
             return cls("selected", matching_records[0], None)
         return cls(
@@ -79,6 +91,12 @@ class DataDictionary:
             "entries": [item.to_dict() for item in self.entries],
         }
 
+    def to_public_dict(self) -> JSONObject:
+        return {
+            "downstream_outputs": [item.to_public_dict() for item in self.downstream_outputs],
+            "entries": [item.to_public_dict() for item in self.entries],
+        }
+
 
 class DataDictionaryStore:
     def __init__(self, state_root: Path | str | None) -> None:
@@ -86,7 +104,7 @@ class DataDictionaryStore:
             field = "state_root"
             detail = "explicit plugin-managed path required"
             raise RegistryError(field, detail)
-        self._path = Path(state_root) / DATA_DICTIONARY_FILENAME
+        self._path = validate_state_root(state_root) / DATA_DICTIONARY_FILENAME
 
     def load(self) -> DataDictionary:
         if not self._path.exists():
@@ -110,10 +128,29 @@ def _confirmed_selection(
 ) -> ConfirmedSelection | None:
     for confirmation in confirmations:
         if _matches_template(confirmation, template_id):
-            selected = _selected_record(source_records, confirmation.selected_candidate_id)
+            selected_candidate_id = confirmation.selected_candidate_id
+            if selected_candidate_id not in confirmation.candidate_ids:
+                continue
+            selected = _selected_record(source_records, selected_candidate_id)
             if selected is not None:
                 return ConfirmedSelection(selected, confirmation)
     return None
+
+
+def _has_invalid_confirmed_selection(
+    template_id: str,
+    source_records: tuple[SourceRecord, ...],
+    confirmations: tuple[OwnerConfirmationItem, ...],
+) -> bool:
+    for confirmation in confirmations:
+        if not _matches_template(confirmation, template_id):
+            continue
+        selected_candidate_id = confirmation.selected_candidate_id
+        if selected_candidate_id not in confirmation.candidate_ids:
+            return True
+        if _selected_record(source_records, selected_candidate_id) is None:
+            return True
+    return False
 
 
 def _matches_template(confirmation: OwnerConfirmationItem, template_id: str) -> bool:
@@ -145,12 +182,32 @@ def _pending_confirmation(
     return OwnerConfirmationItem(
         confirmation_id=f"confirm-{template_id}-main-source",
         template_id=template_id,
-        reason=(
-            "Multiple source candidates require owner confirmation before "
-            "latest/main selection."
-        ),
+        reason=_confirmation_reason(source_records),
         candidate_ids=candidate_ids,
         state=OwnerConfirmationState.PENDING,
         selected_candidate_id=None,
         provenance=provenance,
+    )
+
+
+def _confirmation_reason(source_records: tuple[SourceRecord, ...]) -> str:
+    if len(source_records) > 1:
+        return (
+            "Multiple source candidates require owner confirmation before "
+            "latest/main selection."
+        )
+    if not source_records:
+        return (
+            "No current source candidates are available; owner confirmation "
+            "is required before latest/main selection."
+        )
+    source = source_records[0]
+    if source.confidence < CONFIDENCE_HIGH_MIN:
+        return (
+            "Low-confidence source candidate requires owner confirmation before "
+            "latest/main selection."
+        )
+    return (
+        "Owner confirmation is required before the selected latest/main source "
+        "can be reused."
     )
