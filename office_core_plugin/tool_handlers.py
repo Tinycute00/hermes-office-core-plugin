@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from time import time_ns
-from typing import Final, assert_never
+from typing import Final
 
 from .handler_contract import JSONObject, JSONValue, ToolDefinition
+from .operation_classifier import classify_operation
 from .operation_policy import (
     ConfirmationState,
     OperationFlags,
@@ -15,6 +16,7 @@ from .operation_policy import (
     run_operation,
 )
 from .redaction import redact_text
+from .workflow_plan_contract import draft_workflow_plan
 
 TOOLSET: Final = "office-core"
 TOOL_NAMES: Final = ("office_diagnostic", "office_plan_workflow", "office_preview_operation")
@@ -50,33 +52,27 @@ def _diagnostic_handler(_args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
 
 
 def _plan_workflow_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
+    draft = draft_workflow_plan(args, _tool_observed_at())
     request = _read_request(
         "office_plan_workflow",
         "workflow draft plan",
         _text_arg(args, "intent"),
     )
-    return run_operation(
-        request,
-        lambda: {
-            "intent": _text_arg_summary(args, "intent", "unspecified"),
-            "effect": "none",
-            "mode": "draft_plan",
-            "next_step": "review_plan",
-        },
-    )
+    return run_operation(request, draft.to_summary)
 
 
 def _preview_operation_handler(args: JSONObject, **_kwargs: JSONValue) -> JSONValue:
     raw_operation = _text_arg(args, "operation")
-    kind = _operation_kind(raw_operation)
-    flags = _flags_for_kind(kind)
+    risk = classify_operation(raw_operation)
     request = OperationRequest(
-        kind=kind,
-        risk_level=RiskLevel.HIGH if flags.is_high_impact else RiskLevel.LOW,
+        kind=risk.kind,
+        risk_level=risk.risk_level,
         label=_text_arg_summary(args, "operation", "unspecified"),
-        flags=flags,
-        confirmation_state=_confirmation_state(args, flags),
-        confidence=0.75 if flags.is_high_impact else 0.86,
+        flags=risk.flags,
+        confirmation_state=ConfirmationState.REQUIRED
+        if risk.requires_confirmation
+        else ConfirmationState.NOT_REQUIRED,
+        confidence=0.75 if risk.requires_confirmation else 0.86,
         provenance=(
             ProvenanceInput(
                 source_type="tool_args",
@@ -141,42 +137,6 @@ def _text_arg(args: JSONObject, key: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     return value
-
-
-def _confirmation_state(args: JSONObject, flags: OperationFlags) -> ConfirmationState:
-    raw_state = _text_arg(args, "confirmation_state")
-    if raw_state is not None:
-        return ConfirmationState.parse(raw_state)
-    if flags.is_high_impact:
-        return ConfirmationState.REQUIRED
-    return ConfirmationState.NOT_REQUIRED
-
-
-def _operation_kind(operation: str | None) -> OperationKind:
-    if operation is None:
-        return OperationKind.READ
-    lowered = operation.lower()
-    if any(term in lowered for term in ("send", "email", "forward")):
-        return OperationKind.EXTERNAL_SEND
-    if any(term in lowered for term in ("delete", "remove")):
-        return OperationKind.DELETE
-    if any(term in lowered for term in ("write", "save", "update", "create")):
-        return OperationKind.WRITE
-    return OperationKind.READ
-
-
-def _flags_for_kind(kind: OperationKind) -> OperationFlags:
-    match kind:
-        case OperationKind.READ:
-            return OperationFlags(read=True)
-        case OperationKind.WRITE:
-            return OperationFlags(write=True)
-        case OperationKind.DELETE:
-            return OperationFlags(delete=True)
-        case OperationKind.EXTERNAL_SEND:
-            return OperationFlags(external_send=True)
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 TOOL_DEFINITIONS: Final[tuple[ToolDefinition, ...]] = (
