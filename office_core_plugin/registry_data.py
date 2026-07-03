@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Self
 
 from .operation_policy import confidence_band
-from .redaction import redact_text
+from .redaction import redact_json, redact_text
 from .registry_base import confidence, objects, one_object, text, text_tuple
 from .registry_core import (
     ProvenanceRecord,
@@ -58,6 +58,11 @@ class ReusableDataEntry:
             "value": self.value,
         }
 
+    def to_public_dict(self) -> JSONObject:
+        data = self.to_dict()
+        data["value"] = redact_json(self.value)
+        return data
+
 
 @dataclass(frozen=True, slots=True)
 class DownstreamOutput:
@@ -92,6 +97,9 @@ class DownstreamOutput:
             "source_record_ids": [*self.source_record_ids],
             "template_id": redact_text(self.template_id),
         }
+
+    def to_public_dict(self) -> JSONObject:
+        return self.to_dict()
 
 
 def reusable_entries(data: JSONObject) -> tuple[ReusableDataEntry, ...]:

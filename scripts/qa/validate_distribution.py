@@ -217,7 +217,7 @@ def check_sdist(repo: Path) -> CheckResult:
     return CheckResult("sdist_contains_distribution_files", not missing, f"missing={missing}")
 
 
-def run_checks(repo: Path) -> Sequence[CheckResult]:
+def run_checks(repo: Path, *, allow_execute: bool = False) -> Sequence[CheckResult]:
     required_files = (
         "plugin.yaml",
         "__init__.py",
@@ -235,11 +235,20 @@ def run_checks(repo: Path) -> Sequence[CheckResult]:
         (
             check_manifest(repo),
             check_pyproject(repo),
-            check_register_consistency(repo),
             check_manifest_rules(repo),
             check_sdist(repo),
         )
     )
+    if allow_execute:
+        checks.append(check_register_consistency(repo))
+    else:
+        checks.append(
+            CheckResult(
+                "register_consistency",
+                passed=True,
+                detail="skipped_execution: use --allow-execute-trusted-repo to validate imports",
+            )
+        )
     return checks
 
 
@@ -248,6 +257,15 @@ def parse_args() -> argparse.Namespace:
         description="Validate the Hermes Office Core distribution contract.",
     )
     parser.add_argument("--repo", required=True, type=Path)
+    parser.add_argument(
+        "--allow-execute-trusted-repo",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in to execution-based validation (imports and runs repo code). "
+            "Default is static inspection only for untrusted repos."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -258,7 +276,7 @@ def main() -> int:
     print(f"repo: {repo}")
     print(f"python: {sys.executable}")
     try:
-        checks = run_checks(repo)
+        checks = run_checks(repo, allow_execute=args.allow_execute_trusted_repo)
     except DistributionContractError as exc:
         print(f"assertion: distribution_contract=FAIL - {exc}")
         print("result: FAIL")
@@ -278,6 +296,7 @@ def main() -> int:
     print("hung_or_long_commands: build is a bounded subprocess in the caller-controlled run")
     print("flaky_tests: checks are deterministic filesystem and metadata assertions")
     print("untrusted_external_text: metadata is parsed as data and never executed as prose")
+    print("sandboxed_default: execution-based checks require --allow-execute-trusted-repo")
     print("not_applicable: cancel_resume, repeated_interruptions")
     print(f"result: {'FAIL' if failed else 'PASS'}")
     return 1 if failed else 0

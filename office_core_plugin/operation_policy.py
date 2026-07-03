@@ -150,8 +150,6 @@ class PolicyDecision:
 def run_operation(request: OperationRequest, executor: OperationExecutor) -> JSONObject:
     provenance = tuple(item.to_record() for item in request.provenance)
     if _is_high_impact(request):
-        if request.confirmation_state is ConfirmationState.CONFIRMED:
-            return _draft_outcome(request, provenance)
         return _denial_outcome(request, provenance)
     data = redact_json(executor())
     return _success_outcome(request, provenance, data)
@@ -194,30 +192,11 @@ def _denial_outcome(request: OperationRequest, provenance: tuple[JSONObject, ...
     decision = PolicyDecision(
         success=False,
         requires_confirmation=True,
-        draft_only=False,
-        data=None,
-    )
-    return _base_outcome(request, provenance, audit, decision)
-
-
-def _draft_outcome(request: OperationRequest, provenance: tuple[JSONObject, ...]) -> JSONObject:
-    audit = _audit_record(
-        request,
-        AuditOutcome("draft_created", "draft_only", "v0.1 high-impact operations are draft-only"),
-        provenance,
-    )
-    data: JSONObject = {
-        "status": "draft_created",
-        "operation_kind": request.kind.value,
-        "external_side_effect": False,
-    }
-    decision = PolicyDecision(
-        success=True,
-        requires_confirmation=False,
         draft_only=True,
-        data=data,
+        data={"external_side_effect": False},
     )
     return _base_outcome(request, provenance, audit, decision)
+
 
 
 def _is_high_impact(request: OperationRequest) -> bool:

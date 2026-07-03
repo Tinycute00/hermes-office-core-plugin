@@ -10,10 +10,14 @@ from typing import TYPE_CHECKING
 from .data_maps import DataDictionary, DataDictionaryStore, SourceSelectionResult
 from .e2e_fixtures import (
     ambiguous_source_selection,
+    approved_reusable_data_to_deck,
     bridge_plan,
     data_dictionary,
     denied_operation,
+    external_send_preview,
     local_file_search,
+    messy_spreadsheet_data_package,
+    monthly_report_template_update,
     prepare_fixture_files,
     read_operation,
     source_record,
@@ -64,8 +68,8 @@ def build_representative_workflow_probe(paths: E2EPaths) -> JSONObject:
     return {
         "scenario": "representative-office-workflows",
         "template_update": _template_update(template.to_dict(), draft_path),
-        "messy_data_package": _messy_data_package(dictionary.to_dict(), selected),
-        "reusable_data_application": dictionary.to_dict(),
+        "messy_data_package": _messy_data_package(dictionary.to_public_dict(), selected),
+        "reusable_data_application": dictionary.to_public_dict(),
         "owner_confirmation_workflow": build_ambiguous_latest_main_probe(
             paths.artifact_root / "ambiguous",
         )["source_selection"],
@@ -74,10 +78,20 @@ def build_representative_workflow_probe(paths: E2EPaths) -> JSONObject:
         "policy_denied_operation": denied_operation(),
         "operation_records": [read_operation(), denied_operation()],
         "artifact_paths": _artifact_paths(paths.state_root, draft_path),
+        "office_correctness_fixtures": list(build_office_correctness_workflows()),
         "no_real_runtime_mutation": True,
         "fixture_root": str(paths.fixture_root),
         "state_root": str(paths.state_root),
     }
+
+
+def build_office_correctness_workflows() -> tuple[JSONObject, ...]:
+    return (
+        monthly_report_template_update(),
+        messy_spreadsheet_data_package(),
+        approved_reusable_data_to_deck(),
+        external_send_preview(),
+    )
 
 
 def build_ambiguous_latest_main_probe(artifact_root: Path | str) -> JSONObject:

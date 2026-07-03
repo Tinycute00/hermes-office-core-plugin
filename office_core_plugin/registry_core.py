@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Self, assert_never
 
 from .operation_policy import confidence_band
 from .redaction import redact_text
@@ -195,13 +195,17 @@ class OwnerConfirmationItem:
 
     @classmethod
     def from_dict(cls, data: JSONObject) -> Self:
+        candidate_ids = text_tuple(data, "candidate_ids")
+        state = confirmation_state(data, "state")
+        selected_candidate_id = optional_text(data, "selected_candidate_id")
+        _validate_owner_confirmation_selection(state, candidate_ids, selected_candidate_id)
         return cls(
             confirmation_id=text(data, "confirmation_id"),
             template_id=text(data, "template_id"),
             reason=text(data, "reason"),
-            candidate_ids=text_tuple(data, "candidate_ids"),
-            state=confirmation_state(data, "state"),
-            selected_candidate_id=optional_text(data, "selected_candidate_id"),
+            candidate_ids=candidate_ids,
+            state=state,
+            selected_candidate_id=selected_candidate_id,
             provenance=provenance(data),
         )
 
@@ -240,3 +244,25 @@ def _redact_optional(value: str | None) -> str | None:
     if value is None:
         return None
     return redact_text(value)
+
+
+def _validate_owner_confirmation_selection(
+    state: OwnerConfirmationState,
+    candidate_ids: tuple[str, ...],
+    selected_candidate_id: str | None,
+) -> None:
+    match state:
+        case OwnerConfirmationState.CONFIRMED:
+            if selected_candidate_id in candidate_ids:
+                return
+            field = "selected_candidate_id"
+            detail = "must reference a candidate for confirmed owner confirmation"
+            raise RegistryError(field, detail)
+        case OwnerConfirmationState.PENDING:
+            if selected_candidate_id is None:
+                return
+            field = "selected_candidate_id"
+            detail = "must be absent until owner confirmation is confirmed"
+            raise RegistryError(field, detail)
+        case unreachable:
+            assert_never(unreachable)

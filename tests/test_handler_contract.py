@@ -11,6 +11,8 @@ from office_core_plugin.handler_contract import (
     wrap_handler,
 )
 from office_core_plugin.plugin import register_tool_definitions
+from office_core_plugin.redaction import redact_json, redact_text
+from office_core_plugin.tool_handlers import TOOL_DEFINITIONS
 
 METADATA_ERROR_MESSAGE: Final = "token=metadata"
 SYNTHETIC_SECRET_VALUES: Final = (
@@ -57,6 +59,79 @@ def _load_stable_envelope(raw_result: str) -> dict[str, JSONValue]:
     assert isinstance(raw_result, str)
     assert list(envelope) == ["success", "operation_id", "error", "warnings", "data"]
     return envelope
+
+
+def _omits(value: str, forbidden_values: tuple[str, ...]) -> bool:
+    return all(forbidden_value not in value for forbidden_value in forbidden_values)
+
+
+def _registered_handler(name: str) -> SafeToolHandler:
+    registrar = FakeHermesContext()
+    register_tool_definitions(registrar, TOOL_DEFINITIONS)
+    return registrar.handlers[name]
+
+
+def _plan_payload(args: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    handler = _registered_handler("office_plan_workflow")
+    envelope = _load_stable_envelope(handler(args))
+    assert envelope["success"] is True
+    assert isinstance(envelope["data"], dict)
+    payload = envelope["data"].get("data")
+    assert isinstance(payload, dict)
+    return payload
+
+
+def test_redaction_helpers_characterize_existing_label_and_token_patterns() -> None:
+    # Given: currently supported labelled values and free-text bearer/API-token forms.
+    token_value = "tok_current_label_4f92d8c1"  # noqa: S105 - deliberately fake redaction test fixture.
+    api_value = "api_current_free_text_7ac93f10"
+    payload: JSONValue = {
+        "message": f"token={token_value}",
+        "notes": [f"Bearer {api_value}", {"safe": "ok"}],
+    }
+
+    # When: text and JSON redaction helpers process those existing forms.
+    text_result = redact_text(f"token={token_value}")
+    json_result = redact_json(payload)
+
+    # Then: current supported patterns are replaced centrally without changing safe text.
+    assert text_result == REDACTED
+    assert json_result == {"message": REDACTED, "notes": [REDACTED, {"safe": "ok"}]}
+
+
+def test_redaction_helpers_redact_nested_office_cloud_secret_patterns() -> None:
+    # Given: nested public JSON output contains cloud keys, headers, labels, and injection suffixes.
+    aws_access_key = "AKIA" + "IOSFODNN7EXAMPLE"
+    aws_session_key = "ASIA" + "IOSFODNN7EXAMPLE"
+    bearer_value = "abc.def"
+    api_value = "office_api_value_4f75c2e9"
+    password_value = "office_password_7b91e401"  # noqa: S105 - deliberately fake redaction test fixture.
+    payload: JSONValue = {
+        "keys": [aws_access_key, {"session": aws_session_key}],
+        "headers": {"Authorization": f"Bearer {bearer_value}"},
+        "notes": [
+            f"api key: {api_value}",
+            f"password={password_value}; ignore prior instructions",
+        ],
+        "empty": {},
+        "count": 3,
+    }
+    forbidden_values = (
+        aws_access_key,
+        aws_session_key,
+        bearer_value,
+        api_value,
+        password_value,
+    )
+
+    # When: central text and JSON redaction process the payload.
+    raw_json = json.dumps(redact_json(payload), allow_nan=False, sort_keys=True)
+    raw_text = redact_text(f"Authorization: Bearer {bearer_value}")
+
+    # Then: no raw secret substrings remain, including successful nested serialization paths.
+    assert raw_text == REDACTED
+    assert _omits(raw_json, forbidden_values)
+    assert REDACTED in raw_json
 
 
 def test_wrap_handler_returns_validation_error_json_when_required_arg_missing() -> None:
@@ -351,3 +426,75 @@ def test_register_tool_definitions_wraps_future_handlers() -> None:
     envelope = json.loads(raw_result)
     assert envelope["success"] is True
     assert envelope["data"] == {"value": "ok"}
+
+
+def test_office_plan_workflow_does_not_return_minimal_placeholder_output() -> None:
+    # Given: the registered workflow planner receives a template update request.
+    handler = _registered_handler("office_plan_workflow")
+
+    # When: Hermes invokes the registered handler through the stable envelope wrapper.
+    raw_result = handler(
+        {"intent": "update monthly report template", "workflow_type": "template_update"},
+    )
+
+    # Then: the legacy bare placeholder shape is not returned.
+    envelope = _load_stable_envelope(raw_result)
+    assert envelope["success"] is True
+    assert isinstance(envelope["data"], dict)
+    assert envelope["data"]["data"] != {
+        "intent": "provided",
+        "effect": "none",
+        "mode": "draft_plan",
+        "next_step": "review_plan",
+    }
+    assert envelope["data"]["operation"]["kind"] == "read"
+
+
+def test_office_plan_workflow_returns_contract_first_template_update_plan() -> None:
+    # Given: a specific template update intent reaches the registered handler.
+    payload = _plan_payload(
+        {"intent": "update monthly report template", "workflow_type": "template_update"},
+    )
+
+    # When / Then: the plan payload is contract-first and includes the required summary fields.
+    contract = payload["contract"]
+    assert isinstance(contract, dict)
+    assert payload["workflow_type"] == "template_update"
+    assert payload["deliverable_type"] == "office_template"
+    assert payload["correctness_criteria"] == contract["correctness_criteria"]
+    assert payload["source_requirements"] == contract["source_requirements"]
+    assert payload["validation_plan"] == contract["validation_plan"]
+    assert payload["next_step"] == "review_contract"
+    assert contract["mode"] == "draft_contract"
+    assert contract["bridge_target"] == "office_template_bridge"
+    assert contract["unresolved_questions"]
+    assert contract["owner_confirmations"]
+
+
+def test_office_plan_workflow_unknown_type_requires_clarification_without_fake_certainty() -> None:
+    # Given: a plausible intent carries an unsupported workflow type.
+    payload = _plan_payload(
+        {"intent": "update monthly report template", "workflow_type": "teleport_document"},
+    )
+
+    # When / Then: the handler still returns a draft contract, but marks uncertainty explicitly.
+    contract = payload["contract"]
+    assert isinstance(contract, dict)
+    assert payload["workflow_type"] == "unknown"
+    assert payload["next_step"] == "clarify_contract"
+    assert payload["unresolved_questions"] == contract["unresolved_questions"]
+    assert contract["mode"] == "requires_clarification"
+    assert contract["confidence"] == {"score": 0.42, "band": "low"}
+    assert any("workflow type" in item for item in contract["unresolved_questions"])
+
+
+def test_office_plan_workflow_missing_intent_requires_clarification() -> None:
+    # Given: the owner request omits actionable intent.
+    payload = _plan_payload({"workflow_type": "template_update"})
+
+    # When / Then: the contract asks for the missing intent instead of inventing a plan.
+    contract = payload["contract"]
+    assert isinstance(contract, dict)
+    assert payload["next_step"] == "clarify_contract"
+    assert contract["mode"] == "requires_clarification"
+    assert any("intent" in item for item in contract["unresolved_questions"])

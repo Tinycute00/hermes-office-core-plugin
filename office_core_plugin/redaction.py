@@ -9,9 +9,11 @@ JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 REDACTED: Final = "[REDACTED]"
 AUTHORIZATION_FIELD_PATTERN_SOURCE: Final = r"proxy[_-]?authorization|authorization"
 REDACTION_FIELD_PATTERN_SOURCE: Final = (
-    rf"secret|token|password|api[_-]?key|{AUTHORIZATION_FIELD_PATTERN_SOURCE}|credential"
+    rf"secret|token|password|api[_\-\s]?key|{AUTHORIZATION_FIELD_PATTERN_SOURCE}|credential"
 )
 CREDENTIAL_VALUE_PATTERN_SOURCE: Final = r"[A-Za-z0-9][A-Za-z0-9._~+/\-=]{11,}"
+SHORT_CREDENTIAL_VALUE_PATTERN_SOURCE: Final = r"[A-Za-z0-9][A-Za-z0-9._~+/\-=]{2,}"
+AWS_ACCESS_KEY_PATTERN_SOURCE: Final = r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"
 SECRET_TEXT_PATTERN: Final = re.compile(
     rf"""(?ix)
     (?:
@@ -37,10 +39,12 @@ SECRET_TEXT_PATTERN: Final = re.compile(
 FREE_TEXT_SECRET_PATTERN: Final = re.compile(
     rf"""(?ix)
     (?:
-        \b(?:bearer|basic)\s+{CREDENTIAL_VALUE_PATTERN_SOURCE}
+        {AWS_ACCESS_KEY_PATTERN_SOURCE}
         |
-        \b(?:api[_\-\s]?(?:key|token)|access[_\-\s]?token|auth[_\-\s]?token)
-        \s+(?:is\s+)?{CREDENTIAL_VALUE_PATTERN_SOURCE}
+        \b(?:bearer|basic)\s+{SHORT_CREDENTIAL_VALUE_PATTERN_SOURCE}
+        |
+        \b(?:api[_\-\s]?(?:key|token)|access[_\-\s]?token|auth[_\-\s]?token|password)
+        \s*(?:(?:is\s+)|[:=]\s*)?{CREDENTIAL_VALUE_PATTERN_SOURCE}
         |
         \b(?:sk|pk)-[A-Za-z0-9][A-Za-z0-9._-]{{10,}}\b
         |

@@ -263,3 +263,42 @@ def test_kind_and_confidence_hints_cover_supported_file_families(
     assert candidate.kind is kind
     assert candidate.confidence >= minimum_confidence
     assert reason_fragment in candidate.reason
+
+
+def test_symlinked_file_inside_root_pointing_outside_is_denied(tmp_path: Path) -> None:
+    # Given: an allowed root with a symlink file pointing outside it.
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    _write(outside / "secret.pdf", "sensitive")
+    link = root / "linked-secret.pdf"
+    try:
+        link.symlink_to(outside / "secret.pdf")
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    # When: the adapter scans the allowed root.
+    result = discover_local_file_candidates(_config(root))
+
+    # Then: it records a denial for the escape and excludes the outside file.
+    assert result.candidates == ()
+    assert [item.reason for item in result.denials] == ["symlink_escape"]
+    assert result.audit[-1].event_type == "path_denied"
+
+
+def test_traversal_path_with_dotdot_is_denied(tmp_path: Path) -> None:
+    # Given: an allowed root and a traversal path escaping it.
+    root = tmp_path / "allowed"
+    root.mkdir()
+    _write(tmp_path / "outside" / "escape.docx")
+    traversal = Path("..") / "outside" / "escape.docx"
+
+    # When: a traversal path is requested.
+    result = discover_local_file_candidates(
+        _config(root, ConfigOptions(requested_paths=(traversal,))),
+    )
+
+    # Then: the traversal escape is denied.
+    assert result.success is False
+    assert result.candidates == ()
+    assert [item.reason for item in result.denials] == ["path_outside_allowed_roots"]

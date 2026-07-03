@@ -19,6 +19,7 @@ from office_core_plugin.registry_models import (
     TemplateRegistry,
     TemplateRegistryStore,
 )
+from office_core_plugin.task_contract import SourceRequirement
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -132,6 +133,26 @@ def test_non_hex_evidence_hash_is_rejected() -> None:
         ProvenanceRecord.from_dict(payload)
 
 
+def test_source_requirement_preserves_freshness_and_selection_rules() -> None:
+    # Given: a contract-level source requirement with explicit freshness metadata.
+    payload = {
+        "evidence_hash": "a" * 64,
+        "freshness_constraints": ["Owner confirms this is the current main workbook."],
+        "label": "main report workbook",
+        "selection_rule": "single_high_confidence_source_or_owner_confirmation",
+        "summary": "Sanitized report source metadata only.",
+        "uri": "state://sources/main-report.xlsx",
+    }
+
+    # When: it crosses the contract JSON boundary.
+    emitted = SourceRequirement.from_dict(payload).to_dict()
+
+    # Then: freshness, confidence, and selection rules remain contract-visible.
+    assert emitted["freshness_constraints"] == payload["freshness_constraints"]
+    assert emitted["selection_rule"] == payload["selection_rule"]
+    assert emitted["minimum_confidence"] == 0.8
+
+
 def test_invalid_classification_diagnostic_redacts_untrusted_secret_text() -> None:
     # Given: an invalid enum value containing untrusted authorization text.
     token = "sk-test-" + "SECRET-1234567890"
@@ -173,6 +194,81 @@ def test_owner_confirmation_serializes_round_trip() -> None:
     # Then: all owner state remains stable for later confirmation.
     assert parsed == item
     assert parsed.to_dict()["state"] == "pending"
+
+
+def test_confirmed_owner_confirmation_round_trips_with_selected_candidate() -> None:
+    # Given: an owner confirmation item already confirmed for one candidate.
+    item = OwnerConfirmationItem(
+        confirmation_id="confirm-tpl-invoice-main",
+        template_id="tpl-invoice",
+        reason="Multiple candidates below high confidence require owner choice.",
+        candidate_ids=("candidate-a", "candidate-b"),
+        state=OwnerConfirmationState.CONFIRMED,
+        selected_candidate_id="candidate-b",
+        provenance=(_provenance("conflict"),),
+    )
+
+    # When: the item is serialized and parsed back.
+    parsed = OwnerConfirmationItem.from_dict(item.to_dict())
+
+    # Then: the confirmed owner selection remains explicit and stable.
+    assert parsed == item
+    assert parsed.selected_candidate_id == "candidate-b"
+
+
+def test_confirmed_owner_confirmation_rejects_selected_candidate_outside_candidates() -> None:
+    # Given: forged persisted JSON marks a non-candidate as owner-confirmed.
+    payload = OwnerConfirmationItem(
+        confirmation_id="confirm-tpl-invoice-main",
+        template_id="tpl-invoice",
+        reason="Multiple candidates below high confidence require owner choice.",
+        candidate_ids=(),
+        state=OwnerConfirmationState.CONFIRMED,
+        selected_candidate_id="candidate-b",
+        provenance=(_provenance("conflict"),),
+    ).to_dict()
+
+    # When / Then: boundary parsing rejects the forged confirmed state.
+    with pytest.raises(RegistryError, match="selected_candidate_id"):
+        OwnerConfirmationItem.from_dict(payload)
+
+
+def test_pending_owner_confirmation_rejects_selected_candidate() -> None:
+    # Given: forged persisted JSON carries an owner selection while still pending.
+    payload = OwnerConfirmationItem(
+        confirmation_id="confirm-tpl-invoice-main",
+        template_id="tpl-invoice",
+        reason="Multiple candidates below high confidence require owner choice.",
+        candidate_ids=("candidate-a", "candidate-b"),
+        state=OwnerConfirmationState.PENDING,
+        selected_candidate_id="candidate-b",
+        provenance=(_provenance("conflict"),),
+    ).to_dict()
+
+    # When / Then: boundary parsing rejects the inconsistent pending state.
+    with pytest.raises(RegistryError, match="selected_candidate_id"):
+        OwnerConfirmationItem.from_dict(payload)
+
+
+def test_owner_confirmation_rejects_malformed_selected_candidate_fields() -> None:
+    # Given: malformed persisted owner confirmation shapes from untrusted JSON.
+    valid = OwnerConfirmationItem(
+        confirmation_id="confirm-tpl-invoice-main",
+        template_id="tpl-invoice",
+        reason="Multiple candidates below high confidence require owner choice.",
+        candidate_ids=("candidate-a",),
+        state=OwnerConfirmationState.CONFIRMED,
+        selected_candidate_id="candidate-a",
+        provenance=(_provenance("conflict"),),
+    ).to_dict()
+    without_candidates = {key: value for key, value in valid.items() if key != "candidate_ids"}
+    with_empty_selected_id = {**valid, "selected_candidate_id": ""}
+
+    # When / Then: missing candidates and empty selected IDs fail at the boundary.
+    with pytest.raises(RegistryError, match="candidate_ids"):
+        OwnerConfirmationItem.from_dict(without_candidates)
+    with pytest.raises(RegistryError, match="selected_candidate_id"):
+        OwnerConfirmationItem.from_dict(with_empty_selected_id)
 
 
 def test_registry_store_writes_deterministic_json_under_supplied_state_root(
@@ -218,3 +314,22 @@ def test_registry_store_requires_explicit_state_root() -> None:
     # Given / When / Then: runtime storage cannot silently default to the repo or cwd.
     with pytest.raises(RegistryError, match="state_root"):
         TemplateRegistryStore(None)
+
+
+def test_registry_store_rejects_symlinked_state_root_escaping_base(
+    tmp_path: Path,
+) -> None:
+    # Given: a state_root that is a symlink pointing outside the intended base.
+    intended = tmp_path / "intended"
+    intended.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlinked_root = intended / "state"
+    try:
+        symlinked_root.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    # When / Then: constructing the store raises before any write occurs.
+    with pytest.raises(RegistryError, match="symlink_escape"):
+        TemplateRegistryStore(symlinked_root)

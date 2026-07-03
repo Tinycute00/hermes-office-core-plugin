@@ -13,11 +13,12 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
 import tempfile
-import textwrap
+import tomllib
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NoReturn
 
@@ -36,151 +37,94 @@ def fail(message: str) -> NoReturn:
     raise DirectoryLoaderValidationError(message)
 
 
-def strict_loader_child_code() -> str:
-    return textwrap.dedent(
-        """
-        from __future__ import annotations
+def run_static_checks(repo: Path) -> list[dict[str, object]]:
+    """Static inspection checks that do not execute repo code."""
+    checks: list[dict[str, object]] = []
 
-        import importlib
-        import importlib.util
-        import sys
-        import types
-        from pathlib import Path
-
-        EXPECTED_TOOLS = (
-            "office_diagnostic",
-            "office_plan_workflow",
-            "office_preview_operation",
-        )
-        EXPECTED_SKILLS = tuple(sorted((
-            "office-core:office-diagnostic",
-            "office-core:office-template-update",
-            "office-core:office-data-package",
-            "office-core:office-reuse-data",
-        )))
-
-        repo_root = Path(sys.argv[1]).resolve(strict=True)
-        plugin_dir = repo_root
-
-        def path_contains_importable_office_core(path_entry: str) -> bool:
-            if path_entry == "":
-                return True
-            try:
-                candidate = Path(path_entry).resolve()
-            except OSError:
-                return False
-            return (
-                candidate == repo_root
-                or candidate == plugin_dir
-                or repo_root in candidate.parents
-                or plugin_dir in candidate.parents
-                or candidate.name == "site-packages"
-                or (candidate / "office_core_plugin").exists()
-                or (candidate / "office_core_plugin.py").exists()
-            )
-
-        sys.path = [
-            path_entry
-            for path_entry in sys.path
-            if not path_contains_importable_office_core(path_entry)
-        ]
-        sys.meta_path = [
-            finder
-            for finder in sys.meta_path
-            if not (
-                type(finder).__module__.startswith("__editable__")
-                or getattr(finder, "__module__", "").startswith("__editable__")
-            )
-        ]
-        importlib.invalidate_caches()
-        assert str(repo_root) not in sys.path
-        assert str(plugin_dir) not in sys.path
-        assert importlib.util.find_spec("office_core_plugin") is None
-
-        stale_package = types.ModuleType("office_core_plugin")
-        stale_package.__file__ = "/tmp/site-packages/office_core_plugin/__init__.py"
-        stale_package.register = lambda ctx: None
-        sys.modules["office_core_plugin"] = stale_package
-
-        class FakeHermesContext:
-            def __init__(self) -> None:
-                self.tools = {}
-                self.hooks = {}
-                self.commands = {}
-                self.skills = {}
-
-            def register_tool(self, **kwargs):
-                name = kwargs["name"]
-                self.tools[name] = kwargs
-
-            def register_hook(self, hook_name, callback):
-                self.hooks[hook_name] = callback
-
-            def register_command(
-                self,
-                name,
-                handler,
-                description="",
-                args_hint="",
-            ):
-                _ = description
-                _ = args_hint
-                self.commands[name] = handler
-
-            def register_skill(self, name, path, description=""):
-                _ = description
-                self.skills[f"office-core:{name}"] = path
-
-        ns_parent = "hermes_plugins"
-        ns_pkg = types.ModuleType(ns_parent)
-        ns_pkg.__path__ = []
-        ns_pkg.__package__ = ns_parent
-        sys.modules[ns_parent] = ns_pkg
-
-        module_name = "hermes_plugins.office_core"
-        spec = importlib.util.spec_from_file_location(
-            module_name,
-            plugin_dir / "__init__.py",
-            submodule_search_locations=[str(plugin_dir)],
-        )
-        assert spec is not None
-        assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        module.__package__ = module_name
-        module.__path__ = [str(plugin_dir)]
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-        assert callable(module.register)
-        loaded_package_file = Path(sys.modules["office_core_plugin"].__file__).resolve()
-        assert str(loaded_package_file).startswith(str(plugin_dir))
-
-        ctx = FakeHermesContext()
-        module.register(ctx)
-        assert tuple(ctx.tools) == EXPECTED_TOOLS
-        assert tuple(sorted(ctx.hooks)) == ("post_tool_call",)
-        assert tuple(sorted(ctx.commands)) == ("office_status",)
-        assert tuple(sorted(ctx.skills)) == EXPECTED_SKILLS
-        assert bool(ctx.tools and ctx.hooks)
-
-        print("repo_root_not_on_sys_path=PASS")
-        print("plugin_dir_not_on_sys_path=PASS")
-        print("loaded_package_from_plugin_dir=PASS")
-        print("register_callable=PASS")
-        print("register_invoked=PASS")
-        print("registered_tools=PASS")
-        print("registered_hooks=PASS")
-        print("registered_commands=PASS")
-        print("registered_skills=PASS")
-        """,
+    required_files = (
+        "__init__.py",
+        "plugin.yaml",
+        "pyproject.toml",
+        "office_core_plugin/__init__.py",
+        "office_core_plugin/plugin.py",
     )
+    for rel_path in required_files:
+        path = repo / rel_path
+        checks.append(
+            {
+                "name": f"file_exists:{rel_path}",
+                "passed": path.is_file(),
+                "detail": str(path),
+            }
+        )
 
+    # Parse plugin.yaml without executing it.
+    manifest_path = repo / "plugin.yaml"
+    if manifest_path.is_file():
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+        manifest_ok = (
+            "name: office-core" in manifest_text
+            and "version: 0.1.0" in manifest_text
+            and "entrypoint: __init__.py" in manifest_text
+        )
+        checks.append(
+            {
+                "name": "manifest_content",
+                "passed": manifest_ok,
+                "detail": "plugin.yaml static inspection",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "manifest_content",
+                "passed": False,
+                "detail": "plugin.yaml missing",
+            }
+        )
+
+    # Parse pyproject.toml entry point without executing.
+    pyproject_path = repo / "pyproject.toml"
+    if pyproject_path.is_file():
+        try:
+            data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+            project = data.get("project", {})
+            entry_groups = project.get("entry-points", {})
+            hermes_plugins = entry_groups.get("hermes_agent.plugins", {})
+            entry_ok = hermes_plugins.get("office-core") == "office_core_plugin:register"
+            checks.append(
+                {
+                    "name": "pyproject_entry_point",
+                    "passed": entry_ok,
+                    "detail": "pyproject.toml static inspection",
+                }
+            )
+        except (AttributeError, tomllib.TOMLDecodeError) as exc:
+            checks.append(
+                {
+                    "name": "pyproject_entry_point",
+                    "passed": False,
+                    "detail": f"parse error: {exc}",
+                }
+            )
+    else:
+        checks.append(
+            {
+                "name": "pyproject_entry_point",
+                "passed": False,
+                "detail": "pyproject.toml missing",
+            }
+        )
+
+    return checks
 
 def run_strict_loader(repo: Path) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     _ = env.pop("PYTHONPATH", None)
+    child_script = Path(__file__).with_name("directory_loader_child.py")
     with tempfile.TemporaryDirectory(prefix="office-core-loader-") as temp_dir:
         return subprocess.run(
-            [sys.executable, "-c", strict_loader_child_code(), str(repo)],
+            [sys.executable, str(child_script), str(repo)],
             cwd=temp_dir,
             env=env,
             text=True,
@@ -189,18 +133,45 @@ def run_strict_loader(repo: Path) -> subprocess.CompletedProcess[str]:
         )
 
 
-def parse_repo_arg(argv: Sequence[str]) -> Path:
-    if len(argv) == SPLIT_REPO_ARG_COUNT and argv[1] == "--repo":
-        return Path(argv[2]).resolve(strict=True)
-    if len(argv) == INLINE_REPO_ARG_COUNT and argv[1].startswith("--repo="):
-        return Path(argv[1].partition("=")[2]).resolve(strict=True)
-    fail("usage: validate_directory_loader.py --repo <plugin-repo-root>")
+def parse_repo_arg(argv: Sequence[str]) -> tuple[Path, bool]:
+    parser = argparse.ArgumentParser(
+        description="Validate the Hermes Office Core directory loader contract.",
+    )
+    parser.add_argument("--repo", required=True, type=Path)
+    parser.add_argument(
+        "--allow-execute-trusted-repo",
+        action="store_true",
+        default=False,
+        help=(
+            "Opt-in to execution-based validation (imports and runs repo code). "
+            "Default is static inspection only for untrusted repos."
+        ),
+    )
+    args = parser.parse_args(argv[1:])
+    return args.repo.resolve(strict=True), args.allow_execute_trusted_repo
 
 
 def main(argv: Sequence[str] = sys.argv) -> int:
-    repo = parse_repo_arg(argv)
+    repo, allow_execute = parse_repo_arg(argv)
+    static_checks = run_static_checks(repo)
+    for check in static_checks:
+        status = "PASS" if check["passed"] else "FAIL"
+        detail = f" - {check['detail']}" if check["detail"] else ""
+        print(f"assertion: {check['name']}={status}{detail}")
+
+    if not all(check["passed"] for check in static_checks):
+        print("result: FAIL")
+        return 1
+
+    if not allow_execute:
+        print("assertion: execution_checks=SKIP - use --allow-execute-trusted-repo to run")
+        print("adversarial_classes:")
+        print("sandboxed_default: execution-based checks require --allow-execute-trusted-repo")
+        print("result: PASS")
+        return 0
+
     completed = run_strict_loader(repo)
-    print(f"command=<{sys.executable} -c strict_loader_child_code {repo}>")
+    print(f"command=<{sys.executable} directory_loader_child.py {repo}>")
     print(f"exit_code={completed.returncode}")
     if completed.stdout:
         print(completed.stdout.rstrip())

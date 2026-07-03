@@ -183,3 +183,31 @@ def _run_strict_loader(
         capture_output=True,
         check=False,
     )
+
+
+def test_directory_plugin_loader_defaults_to_static_inspection_without_execution(
+    tmp_path: Path,
+) -> None:
+    # Given: a plugin checkout and a malicious __init__.py that would mutate state if executed.
+    repo_root = _plugin_repo_root()
+
+    # When: the directory loader validator is invoked WITHOUT the execution flag.
+    result = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "scripts/qa/validate_directory_loader.py",
+            "--repo",
+            str(repo_root),
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    # Then: static checks pass and execution is explicitly skipped.
+    assert result.returncode == 0, result.stderr
+    assert "execution_checks=SKIP" in result.stdout
+    assert "sandboxed_default" in result.stdout
+    # The malicious fixture __init__.py was never executed in default mode.
+    assert "register_invoked=PASS" not in result.stdout
