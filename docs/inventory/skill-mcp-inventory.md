@@ -18,20 +18,20 @@ produce a handoff/fallback plan, not fake success.
 
 ## Inventory
 
-| Capability | Status | Invocation path | Fallback | Confidence |
-| --- | --- | --- | --- | --- |
-| Kanban | installed | Hermes `kanban_*` toolset, `hermes kanban`, `/kanban`, dashboard plugin | Manual owner-confirmation task if profile lacks Kanban tools | 0.95 |
-| Excel/spreadsheet | unknown | Google Sheets through `google-workspace`; no proven local Excel/xlsx engine | Google Sheets handoff or owner-confirmed local spreadsheet plan | 0.62 |
-| Word/docx | available | `ocr-and-documents` guidance plus local file tooling | Manual extraction/update instructions if python-docx bridge is unavailable | 0.70 |
-| PDF/OCR | installed | `nano-pdf`, `ocr-and-documents`, and URL `web_extract` path | URL extraction or manual extraction task if dependencies are missing | 0.88 |
-| PowerPoint/PPT | installed | `powerpoint` skill for .pptx read/create/edit | Deck-change plan with owner confirmation | 0.90 |
-| Google Workspace / Drive / Docs / Sheets / Slides | installed | `google-workspace` skill after OAuth; `gws` if installed, bundled Python fallback otherwise | Manual handoff or future Google MCP bridge | 0.82 |
-| filesystem/local files | available | Hermes `file`/`terminal` toolsets; optional filesystem MCP | Ask for permitted path or no-write manual handoff | 0.90 |
-| GitHub | installed | GitHub skills and authenticated `gh` CLI; optional future MCP | Draft issue/PR/review text for manual execution | 0.90 |
-| Linear | missing | No proven target Hermes path; future Linear MCP/server | Draft Linear update or owner-confirmation item | 0.86 |
-| Outlook/Gmail/Slack communications | available | Gmail via `google-workspace`/`himalaya`; Slack gateway/toolset; Outlook via Email gateway IMAP/SMTP or future MCP | Draft-only output and manual send/confirmation | 0.74 |
-| MCP general bridge | available | `mcp_servers.<name>` config; `fastmcp`/`mcporter` skills for server work | Missing-server bridge plan and manual fallback | 0.87 |
-| Hermes plugin skills / plugin namespace | available | `ctx.register_skill` gives `office-core:<skill>` names; plugin/pip discovery | Documentation and diagnostic output if plugin skill load fails | 0.90 |
+| Capability | Status | Invocation path | Fallback | Confidence | Mutation allowed | Owner confirmation rule |
+| --- | --- | --- | --- | --- | --- | --- |
+| Kanban | installed | Hermes `kanban_*` toolset, `hermes kanban`, `/kanban`, dashboard plugin | Manual owner-confirmation task if profile lacks Kanban tools | 0.95 | false | required for mutation |
+| Excel/spreadsheet | unknown | Google Sheets through `google-workspace`; no proven local Excel/xlsx engine | Google Sheets handoff or owner-confirmed local spreadsheet plan | 0.62 | false | required for mutation |
+| Word/docx | available | `ocr-and-documents` guidance plus local file tooling | Manual extraction/update instructions if python-docx bridge is unavailable | 0.70 | false | required for mutation |
+| PDF/OCR | installed | `nano-pdf`, `ocr-and-documents`, and URL `web_extract` path | URL extraction or manual extraction task if dependencies are missing | 0.88 | false | required for mutation |
+| PowerPoint/PPT | installed | `powerpoint` skill for .pptx read/create/edit | Deck-change plan with owner confirmation | 0.90 | false | required for mutation |
+| Google Workspace / Drive / Docs / Sheets / Slides | installed | `google-workspace` skill after OAuth; `gws` if installed, bundled Python fallback otherwise | Manual handoff or future Google MCP bridge | 0.82 | false | required for mutation |
+| filesystem/local files | available | Hermes `file`/`terminal` toolsets; optional filesystem MCP | Ask for permitted path or no-write manual handoff | 0.90 | false | required for mutation |
+| GitHub | installed | GitHub skills and authenticated `gh` CLI; optional future MCP | Draft issue/PR/review text for manual execution | 0.90 | false | required for mutation |
+| Linear | missing | No proven target Hermes path; future Linear MCP/server | Draft Linear update or owner-confirmation item | 0.86 | false | required for mutation |
+| Outlook/Gmail/Slack communications | available | Gmail via `google-workspace`/`himalaya`; Slack gateway/toolset; Outlook via Email gateway IMAP/SMTP or future MCP | Draft-only output and manual send/confirmation | 0.74 | false | required for mutation |
+| MCP general bridge | available | `mcp_servers.<name>` config; `fastmcp`/`mcporter` skills for server work | Missing-server bridge plan and manual fallback | 0.87 | false | required for mutation |
+| Hermes plugin skills / plugin namespace | available | `ctx.register_skill` gives `office-core:<skill>` names; plugin/pip discovery | Documentation and diagnostic output if plugin skill load fails | 0.90 | false | required for mutation |
 
 ## Proof Notes
 

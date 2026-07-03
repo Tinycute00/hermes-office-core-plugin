@@ -6,6 +6,11 @@
     "invocation_path": "Bridge through Hermes kanban surfaces: kanban_* toolset for model workers, hermes kanban CLI, /kanban slash command, and the bundled dashboard plugin.",
     "fallback": "If kanban tools are unavailable in a profile, create an owner-confirmation/manual task record instead of fabricating board writes.",
     "confidence": 0.95,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Kanban writes require owner confirmation or a manual task handoff."
+    },
     "notes": "Office-core should delegate planning and handoff to Hermes Kanban rather than reimplementing a task board."
   },
   {
@@ -15,6 +20,11 @@
     "invocation_path": "For Google Sheets, enable/use productivity/google-workspace. For local Excel/xlsx files, plan a bridge through a future MCP/filesystem adapter or a later office-core file adapter after owner confirmation.",
     "fallback": "Use Google Sheets handoff when the file is in Workspace; otherwise produce a draft plan and owner-confirmation item for a local spreadsheet workflow.",
     "confidence": 0.62,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Spreadsheet writes or external Workspace handoffs require owner confirmation."
+    },
     "notes": "Do not claim native Excel automation is installed in the target environment."
   },
   {
@@ -24,6 +34,11 @@
     "invocation_path": "Bridge document reads/updates through ocr-and-documents guidance and local file tooling; require a later confirmed adapter before modifying user docx files.",
     "fallback": "If python-docx or a document bridge is unavailable, return extraction/update instructions and request owner confirmation for manual handling.",
     "confidence": 0.7,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Document updates require owner confirmation before any file mutation."
+    },
     "notes": "Available as guidance/skill surface, not as a verified configured Word engine."
   },
   {
@@ -33,6 +48,11 @@
     "invocation_path": "Bridge through nano-pdf for PDF edits and ocr-and-documents for PDF/scanned-document extraction; prefer web_extract for URL PDFs per the skill.",
     "fallback": "If local OCR dependencies are missing, use web_extract for URL documents or create a manual extraction task with owner confirmation.",
     "confidence": 0.88,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "PDF/OCR extraction may proceed read-only; edits require owner confirmation."
+    },
     "notes": "Office-core should call or instruct these skill paths rather than building a PDF/OCR engine."
   },
   {
@@ -42,6 +62,11 @@
     "invocation_path": "Bridge through the powerpoint skill for .pptx read/create/edit flows, including its markitdown, thumbnail, python-pptx, and pptxgenjs guidance.",
     "fallback": "If the skill is disabled or dependencies are unavailable, produce a deck-change plan and require owner confirmation before any file write.",
     "confidence": 0.9,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Presentation creation or edits require owner confirmation."
+    },
     "notes": "PowerPoint work is delegated through the existing skill surface."
   },
   {
@@ -51,6 +76,11 @@
     "invocation_path": "Enable/use google-workspace skill after OAuth setup; use gws when installed or its bundled Python wrapper fallback.",
     "fallback": "If OAuth or gws is unavailable, generate a manual handoff plan or route through a configured Google Workspace MCP/server later.",
     "confidence": 0.82,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Google Workspace reads need configured credentials; writes/sends require owner confirmation."
+    },
     "notes": "Installed skill is target proof; configured credentials and gws backend were not verified."
   },
   {
@@ -60,6 +90,11 @@
     "invocation_path": "Use Hermes file/terminal toolsets for local inspection in profiles that allow them; configure filesystem MCP only when explicitly needed.",
     "fallback": "If file tools are unavailable, ask the owner for a permitted path or create a no-write manual handoff.",
     "confidence": 0.9,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Filesystem writes or broad path access require owner confirmation and explicit allowed roots."
+    },
     "notes": "Office-core should keep file access behind explicit allowlists and confirmations."
   },
   {
@@ -69,6 +104,11 @@
     "invocation_path": "Bridge through GitHub skills and the gh CLI for repository, issue, PR, and review workflows; MCP can be configured later if needed.",
     "fallback": "If GitHub auth or skills are unavailable, prepare draft issue/PR text and require user-side execution.",
     "confidence": 0.9,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "GitHub issue, PR, review, or repository mutations require owner confirmation."
+    },
     "notes": "Local GitHub credentials exist, but office-core must avoid external writes in v0.1."
   },
   {
@@ -78,6 +118,11 @@
     "invocation_path": "No target Hermes invocation path is currently proven. Future path is a configured Linear MCP server or a dedicated skill/plugin.",
     "fallback": "Create owner-confirmation items or draft Linear updates for manual posting until a Linear MCP/server is configured.",
     "confidence": 0.86,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Linear is missing; all Linear output must remain draft/manual until owner confirms a configured bridge."
+    },
     "notes": "Do not rely on the current Codex connector as proof that target Hermes has Linear capability."
   },
   {
@@ -87,6 +132,11 @@
     "invocation_path": "Bridge Gmail through google-workspace or himalaya after setup; bridge Slack through the Hermes Slack gateway/toolset when configured; bridge Outlook through Email gateway IMAP/SMTP or a future MCP/server.",
     "fallback": "When credentials, commands, or gateway adapters are not configured, generate drafts only and request manual send/confirmation.",
     "confidence": 0.74,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Email, Slack, and communication sends require owner confirmation and configured credentials."
+    },
     "notes": "Broad communications surface is available, but no v0.1 external send should execute."
   },
   {
@@ -96,6 +146,11 @@
     "invocation_path": "Configure mcp_servers.<name> in config.yaml for filesystem, GitHub, Linear, Notion, or other servers; use fastmcp/mcporter skills for build/test/inspection.",
     "fallback": "If no MCP server is configured, return a bridge plan with missing server details and manual fallback rather than calling nonexistent tools.",
     "confidence": 0.87,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "MCP tool execution requires configured servers and owner confirmation before external mutation."
+    },
     "notes": "MCP is a bridge surface, not an office-core engine."
   },
   {
@@ -105,6 +160,11 @@
     "invocation_path": "office-core registers bundled skills through ctx.register_skill so users invoke office-core:<skill>; plugin loads from ~/.hermes/plugins, project plugins, or pip entry points when enabled.",
     "fallback": "If plugin skills fail to load, expose the same workflow as documentation and diagnostic tool output for manual execution.",
     "confidence": 0.9,
+    "mutation_allowed": false,
+    "required_owner_confirmation": {
+      "state": "required_for_mutation",
+      "reason": "Plugin skill actions that mutate files or external systems require owner confirmation."
+    },
     "notes": "Todo 12 should use this namespace rather than unqualified global skill names."
   }
 ]
