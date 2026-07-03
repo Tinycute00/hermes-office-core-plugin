@@ -20,6 +20,10 @@ OBSERVED_AT: Final = "2026-06-29T11:00:00Z"
 SYNTHETIC_VALUE: Final = "policy_value_87"
 
 
+def _omits(value: str, forbidden_values: tuple[str, ...]) -> bool:
+    return all(forbidden_value not in value for forbidden_value in forbidden_values)
+
+
 def _request(
     kind: OperationKind,
     flags: OperationFlags,
@@ -72,10 +76,11 @@ def test_audit_and_provenance_records_are_json_serializable_for_all_outcomes() -
     # When: the records are serialized as audit evidence.
     raw_json = json.dumps(outcomes, allow_nan=False, sort_keys=True)
 
-    # Then: every outcome carries audit/provenance and the JSON contains each event class.
+    # Then: every outcome carries audit/provenance and high-impact outcomes are denied.
     assert "policy_allowed" in raw_json
     assert "policy_denied" in raw_json
-    assert "draft_created" in raw_json
+    assert outcomes[2]["audit"][0]["event_type"] == "policy_denied"
+    assert raw_json.count("policy_denied") >= 2
     for outcome in outcomes:
         assert outcome["audit"]
         assert outcome["provenance"]
@@ -97,6 +102,34 @@ def test_untrusted_operation_and_provenance_text_are_redacted() -> None:
     assert SYNTHETIC_VALUE not in raw_json
     assert "[REDACTED]" in raw_json
     assert result["provenance"][0]["evidence_hash"]
+
+
+def test_operation_success_payload_redacts_nested_cloud_secret_values() -> None:
+    # Given: an otherwise successful operation returns nested reusable secret-like values.
+    aws_access_key = "ASIA" + "IOSFODNN7EXAMPLE"
+    bearer_value = "abc.def"
+    api_value = "policy_api_value_f4176de2"
+    request = _request(
+        OperationKind.READ,
+        OperationFlags(read=True),
+        ConfirmationState.NOT_REQUIRED,
+    )
+    forbidden_values = (aws_access_key, bearer_value, api_value)
+
+    # When: the policy wrapper serializes successful output for tools/audit callers.
+    result = run_operation(
+        request,
+        lambda: {
+            "status": "ok",
+            "items": [aws_access_key, {"Authorization": f"Bearer {bearer_value}"}],
+            "note": f"api key: {api_value}",
+        },
+    )
+    raw_json = json.dumps(result, allow_nan=False, sort_keys=True)
+
+    # Then: redaction still runs on successful nested output, not only errors.
+    assert _omits(raw_json, forbidden_values)
+    assert "[REDACTED]" in raw_json
 
 
 def test_confidence_bands_match_policy_boundaries() -> None:
