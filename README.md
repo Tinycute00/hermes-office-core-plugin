@@ -80,7 +80,7 @@ The package exposes `[project.entry-points."hermes_agent.plugins"]` with
 - `UV_PROJECT_ENVIRONMENT`: used by QA wrappers when they must run Hermes from an isolated
   Python environment without writing into the Hermes checkout.
 
-Temp-runtime warning: tests and install probes must use a temporary `HERMES_HOME`, never the
+Temporary runtime warning: tests and install probes must use a temporary `HERMES_HOME`, never the
 real Hermes home, real `.env`, real `auth.json`, real `config.yaml`, or production runtime
 plugin/skill directories.
 

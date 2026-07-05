@@ -145,6 +145,15 @@ def _scan_item(state: ScanState, item: WorkItem) -> None:
     if state.budget.expired():
         _timeout(state)
         return
+    if not item.path.exists():
+        unresolved = item.path.resolve(strict=False)
+        reason = (
+            "path_unavailable"
+            if _matching_root(unresolved, state.roots)
+            else item.escape_reason
+        )
+        _deny(state.denials, state.audit, str(unresolved), reason)
+        return
     resolved = resolve_and_check_within_root(item.path, state.roots)
     if resolved is None:
         _deny(state.denials, state.audit, str(item.path), item.escape_reason)
