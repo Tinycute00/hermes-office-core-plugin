@@ -302,3 +302,20 @@ def test_traversal_path_with_dotdot_is_denied(tmp_path: Path) -> None:
     assert result.success is False
     assert result.candidates == ()
     assert [item.reason for item in result.denials] == ["path_outside_allowed_roots"]
+
+
+def test_requested_missing_path_inside_root_is_denied(tmp_path: Path) -> None:
+    # Given: an allowed root and an explicitly requested file that is not present.
+    root = tmp_path / "allowed"
+    root.mkdir()
+
+    # When: discovery is scoped to the missing path.
+    result = discover_local_file_candidates(
+        _config(root, ConfigOptions(requested_paths=("missing-report.xlsx",))),
+    )
+
+    # Then: the adapter fails closed instead of silently returning a successful empty result.
+    assert result.success is False
+    assert result.candidates == ()
+    assert [item.reason for item in result.denials] == ["path_unavailable"]
+    assert result.audit[-1].event_type == "path_denied"
