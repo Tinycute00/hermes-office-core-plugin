@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Codex lifecycle hook for Office OS.
+
+The hook is intentionally small: detect current-turn Office intent, restore a
+compact active-run pointer, and permit at most two evidence-backed Stop
+continuations. It never edits Office files.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
+import time
+from typing import Any, Iterator
+
+
+def configure_stdio() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
+
+
+SUPPORTED_EXTENSIONS = {
+    ".xlsx": "Excel",
+    ".xls": "Excel",
+    ".xlsm": "Excel",
+    ".docx": "Word",
+    ".doc": "Word",
+    ".docm": "Word",
+    ".pptx": "PowerPoint",
+    ".ppt": "PowerPoint",
+    ".pptm": "PowerPoint",
+    ".pdf": "PDF",
+}
+
+OBJECT_PATTERNS = {
+    "Excel": re.compile(
+        r"\b(?:excel|spreadsheet|workbook|worksheet|sheet|xlsx?|xlsm)\b|"
+        r"試算表|工作簿|工作表|儲存格|公式|對帳|報表",
+        re.IGNORECASE,
+    ),
+    "Word": re.compile(
+        r"\b(?:word|docx?|docm|document|contract|report)\b|"
+        r"文件|文檔|合約|報告|公文|段落|章節",
+        re.IGNORECASE,
+    ),
+    "PowerPoint": re.compile(
+        r"\b(?:powerpoint|pptx?|pptm|presentation|slide|deck)\b|"
+        r"簡報|投影片|幻燈片|母片",
+        re.IGNORECASE,
+    ),
+    "PDF": re.compile(r"\bpdf\b|可攜式文件", re.IGNORECASE),
+}
+
+ACTION_PATTERN = re.compile(
+    r"\b(?:find|search|open|read|extract|summari[sz]e|analy[sz]e|review|"
+    r"check|compare|create|make|write|edit|update|change|fix|format|merge|"
+    r"combine|convert|schedule|repeat|recurring|automate)\b|"
+    r"找|搜尋|查找|查看|讀取|擷取|摘要|分析|檢查|審閱|比較|建立|製作|"
+    r"撰寫|編輯|修改|更新|修正|格式|合併|整合|轉換|排程|定期|循環|自動",
+    re.IGNORECASE,
+)
+
+FENCED_CODE_PATTERN = re.compile(
+    r"(?P<fence>" + chr(96) * 3 + r"|~~~)[^\n]*\n.*?(?P=fence)",
+    re.DOTALL,
+)
+INLINE_CODE_PATTERN = re.compile(
+    r"(?<!\w)(" + chr(96) + r"+)(.+?)\1",
+    re.DOTALL,
+)
+EXTENSION_PATTERN = re.compile(
+    r"(?<![\w.])[^<>\r\n]*?\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
+    re.IGNORECASE,
+)
+ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
+MAX_DEDUP_KEYS = 128
+MAX_CONTINUATIONS = 2
+
+
+def read_input() -> dict[str, Any]:
+    try:
+        raw = sys.stdin.read()
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def emit(value: dict[str, Any]) -> None:
+    sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    sys.stdout.write("\n")
+
+
+def canonical_workspace(cwd: str | None) -> str:
+    base = cwd or os.getcwd()
+    return os.path.normcase(os.path.realpath(os.path.abspath(base)))
+
+
+def plugin_data_root() -> Path:
+    configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
+    if configured:
+        return Path(configured)
+    return Path(tempfile.gettempdir()) / "office-os-plugin-data"
+
+
+def workspace_dir(cwd: str | None) -> Path:
+    canonical = canonical_workspace(cwd)
+    workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+    path = plugin_data_root() / "workspaces" / workspace_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def read_json(path: Path, default: Any) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".office-os-{path.name}.{os.getpid()}.tmp")
+    with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temp_path, path)
+
+
+def cleanup_stale_temps(directory: Path, max_age_seconds: int = 3600) -> None:
+    cutoff = time.time() - max_age_seconds
+    for candidate in directory.glob(".office-os-*.tmp"):
+        try:
+            if candidate.is_file() and candidate.stat().st_mtime <= cutoff:
+                candidate.unlink()
+        except OSError:
+            continue
+
+
+@contextlib.contextmanager
+def state_lock(directory: Path) -> Iterator[bool]:
+    lock_path = directory / "run-state.lock"
+    acquired = False
+    try:
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(descriptor, f"{os.getpid()} {time.time()}".encode("ascii"))
+            os.close(descriptor)
+            acquired = True
+        except FileExistsError:
+            try:
+                if time.time() - lock_path.stat().st_mtime > 120:
+                    lock_path.unlink(missing_ok=True)
+                    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    os.write(descriptor, f"{os.getpid()} {time.time()}".encode("ascii"))
+                    os.close(descriptor)
+                    acquired = True
+            except (OSError, FileExistsError):
+                acquired = False
+        yield acquired
+    finally:
+        if acquired:
+            lock_path.unlink(missing_ok=True)
+
+
+def strip_code(prompt: str) -> str:
+    without_fences = FENCED_CODE_PATTERN.sub(" ", prompt)
+
+    def replace_inline(match: re.Match[str]) -> str:
+        content = match.group(2)
+        if any(extension in content.lower() for extension in SUPPORTED_EXTENSIONS):
+            return content
+        return " "
+
+    return INLINE_CODE_PATTERN.sub(replace_inline, without_fences)
+
+
+def object_hints(prompt: str) -> list[str]:
+    hints: set[str] = set()
+    lower = prompt.lower()
+    for extension, object_name in SUPPORTED_EXTENSIONS.items():
+        if extension in lower:
+            hints.add(object_name)
+    for object_name, pattern in OBJECT_PATTERNS.items():
+        if pattern.search(prompt):
+            hints.add(object_name)
+    return sorted(hints)
+
+
+def is_office_prompt(prompt: str) -> bool:
+    cleaned = strip_code(prompt)
+    if re.search(r"(?<![\w-])\$office-os\b", cleaned, re.IGNORECASE):
+        return True
+    if EXTENSION_PATTERN.search(cleaned):
+        return True
+    return bool(ACTION_PATTERN.search(cleaned) and object_hints(cleaned))
+
+
+def prompt_reference(prompt: str) -> str:
+    hints = object_hints(strip_code(prompt))
+    if len(hints) != 1:
+        return "Office.md"
+    return {
+        "Excel": "Excel.md",
+        "Word": "Word.md",
+        "PowerPoint": "PowerPoint.md",
+        "PDF": "PDF.md",
+    }[hints[0]]
+
+
+def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bool:
+    session_id = str(payload.get("session_id") or "")
+    turn_id = str(payload.get("turn_id") or "")
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    key = f"{session_id}:{turn_id}:{digest}"
+    path = directory / "hook_dedup.json"
+    data = read_json(path, {"keys": []})
+    keys = data.get("keys", []) if isinstance(data, dict) else []
+    keys = [item for item in keys if isinstance(item, str)]
+    if key in keys:
+        return False
+    keys.append(key)
+    write_json(path, {"keys": keys[-MAX_DEDUP_KEYS:]})
+    return True
+
+
+def context_output(event: str, context: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": event,
+            "additionalContext": context,
+        }
+    }
+
+
+def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
+    cleanup_stale_temps(directory)
+    state = read_json(directory / "run_state.json", {})
+    active = (
+        isinstance(state, dict)
+        and state.get("status") in ACTIVE_STATUSES
+        and not state.get("waiting_for_user", False)
+    )
+    context = (
+        "Office OS is available as $office-os for local Excel, Word, "
+        "PowerPoint, PDF, and cross-file work. Reclassify the current turn; "
+        "the first visible Office response line must be the Chinese intent envelope."
+    )
+    if active:
+        context += (
+            f" Active run: {state.get('run_id', 'unknown')}; "
+            f"status={state.get('status')}; "
+            f"remaining_units={state.get('remaining_units', 0)}. "
+            "Resume only when the current request still belongs to this run."
+        )
+    emit(context_output("SessionStart", context))
+
+
+def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
+    prompt = str(payload.get("prompt") or "")
+    if not prompt or not is_office_prompt(prompt):
+        return
+    if not remember_prompt(directory, payload, prompt):
+        return
+    plugin_root = Path(
+        os.environ.get("PLUGIN_ROOT")
+        or os.environ.get("CLAUDE_PLUGIN_ROOT")
+        or Path(__file__).resolve().parents[1]
+    )
+    skill_path = plugin_root / "skills" / "office-os" / "SKILL.md"
+    reference = plugin_root / "skills" / "office-os" / "references" / prompt_reference(prompt)
+    context = (
+        "Current-turn Office workflow detected. Invoke $office-os. "
+        "Before any other visible text, output the intent envelope in this exact shape: "
+        "意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>. "
+        "Classify this turn only; prior edit or schedule permission does not carry over. "
+        f"Read {skill_path} and the relevant reference {reference}."
+    )
+    emit(context_output("UserPromptSubmit", context))
+
+
+def handle_stop(payload: dict[str, Any], directory: Path) -> None:
+    path = directory / "run_state.json"
+    with state_lock(directory) as acquired:
+        if not acquired:
+            emit({})
+            return
+        state = read_json(path, {})
+        if not isinstance(state, dict):
+            emit({})
+            return
+        status = state.get("status")
+        remaining = int(state.get("remaining_units") or 0)
+        waiting = bool(state.get("waiting_for_user", False))
+        continuations = int(state.get("continuation_count") or 0)
+        marker = str(state.get("progress_marker") or "")
+        prior_marker = str(state.get("last_stop_marker") or "")
+        if (
+            status not in {"executing", "validating", "publishing"}
+            or remaining <= 0
+            or waiting
+            or continuations >= MAX_CONTINUATIONS
+        ):
+            emit({})
+            return
+        if not marker or marker == prior_marker:
+            state["no_progress_stops"] = int(state.get("no_progress_stops") or 0) + 1
+            state["updated_at"] = int(time.time())
+            write_json(path, state)
+            emit({})
+            return
+        state["continuation_count"] = continuations + 1
+        state["last_stop_marker"] = marker
+        state["no_progress_stops"] = 0
+        state["updated_at"] = int(time.time())
+        write_json(path, state)
+        emit(
+            {
+                "decision": "block",
+                "reason": (
+                    f"Continue $office-os run {state.get('run_id', '')}: "
+                    f"finish the next dependency-safe chunk and validate it. "
+                    f"{remaining} unit(s) remain. Do not ask the user unless an owner decision is required."
+                ),
+            }
+        )
+
+
+def main() -> int:
+    payload = read_input()
+    event = str(payload.get("hook_event_name") or "")
+    directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
+    if event == "SessionStart":
+        handle_session_start(payload, directory)
+    elif event == "UserPromptSubmit":
+        handle_user_prompt(payload, directory)
+    elif event == "Stop":
+        handle_stop(payload, directory)
+    elif event:
+        emit({})
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

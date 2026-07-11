@@ -1,6 +1,11 @@
-.venv/
 __pycache__/
 *.py[cod]
-*.egg-info/
-build/
-dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+Office OS Output/
+*.tmp
+*.bak.1
+*.bak.2
+*.bak.3

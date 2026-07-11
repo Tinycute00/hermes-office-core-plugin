@@ -1,4 +1,0 @@
-name: office-core
-version: 0.1.0
-entrypoint: __init__.py
-description: Fixture missing root init for install smoke failure testing.

@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "timeout": 10,
+            "statusMessage": "載入 Office OS"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "timeout": 10,
+            "statusMessage": "辨識辦公室需求"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "timeout": 10,
+            "statusMessage": "確認 Office OS 進度"
+          }
+        ]
+      }
+    ]
+  }
+}

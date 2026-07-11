@@ -1,0 +1,29 @@
+{
+  "name": "office-os",
+  "version": "0.1.0",
+  "description": "Local-first Office workflow orchestration for Excel, Word, PowerPoint, PDF, and recurring office tasks.",
+  "author": {
+    "name": "Tinycute00",
+    "url": "https://github.com/Tinycute00"
+  },
+  "homepage": "https://github.com/Tinycute00/hermes-office-core-plugin",
+  "repository": "https://github.com/Tinycute00/hermes-office-core-plugin",
+  "license": "MIT",
+  "keywords": ["office", "excel", "word", "powerpoint", "pdf", "workflow"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Office OS",
+    "shortDescription": "Run local Office work from plain-language requests.",
+    "longDescription": "Classifies an office request, asks only the decisions it needs, processes local Excel, Word, PowerPoint, and PDF files in efficient chunks, publishes stable outputs without changing sources, and can turn accepted work into a recurring Codex task.",
+    "developerName": "Tinycute00",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write", "Interactive"],
+    "websiteURL": "https://github.com/Tinycute00/hermes-office-core-plugin",
+    "defaultPrompt": [
+      "整理這個 Excel，保留原檔並輸出可直接使用的版本。",
+      "檢查這份 Word 或 PowerPoint，快速修正內容與版面。",
+      "把這項辦公室工作完成後設成固定排程。"
+    ],
+    "brandColor": "#185ABD"
+  }
+}
