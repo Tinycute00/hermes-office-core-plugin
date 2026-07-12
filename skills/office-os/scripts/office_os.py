@@ -53,8 +53,12 @@ KNOWN_EXTENSIONS = (
 OUTPUT_DIRECTORY_NAME = "Office OS Output"
 BACKUP_COUNT = 3
 MAX_PUBLISH_RECORDS = 256
+MAX_FULL_TEXT_ROOTS = 32
+MAX_PACKAGE_MEMBERS = 10_000
+MAX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 LOCK_STALE_SECONDS = 6 * 60 * 60
 TEMP_PREFIX = ".office-os-"
+FULL_TEXT_ROOTS_SETTING = "full_text_roots"
 SENSITIVE_PATTERN = re.compile(
     r"confidential|restricted|secret|internal[ -]?only|機密|密件|限閱|內部限定",
     re.IGNORECASE,
@@ -83,6 +87,12 @@ class Fingerprint:
             "device": self.device,
             "inode": self.inode,
         }
+
+
+@dataclass(frozen=True)
+class FullTextRootUpdate:
+    grants: tuple[str, ...]
+    revocations: tuple[str, ...]
 
 
 def utc_now() -> str:
@@ -267,14 +277,15 @@ def detect_sensitivity(path: Path) -> tuple[str, str]:
             return "metadata-only", "encrypted or unreadable Open XML package"
     if extension == ".pdf":
         try:
-            from pypdf import PdfReader  # type: ignore
+            from pypdf import PdfReader
+            from pypdf.errors import PyPdfError
 
             reader = PdfReader(path)
             if reader.is_encrypted:
                 return "metadata-only", "encrypted PDF"
         except ImportError:
             pass
-        except Exception:
+        except (OSError, ValueError, PyPdfError):
             return "metadata-only", "unreadable PDF"
     return "normal", ""
 
@@ -606,7 +617,7 @@ def extract_xlsx(path: Path) -> list[dict[str, Any]]:
 
 def extract_pdf(path: Path) -> list[dict[str, Any]]:
     try:
-        from pypdf import PdfReader  # type: ignore
+        from pypdf import PdfReader
     except ImportError as error:
         raise OfficeOSError(
             "PDF text extraction requires the bundled pypdf library; metadata was still indexed."
@@ -786,9 +797,69 @@ def discover_paths(inputs: Sequence[str]) -> tuple[list[Path], list[Path]]:
 
 def path_is_under(path: Path, root: Path) -> bool:
     try:
-        return os.path.commonpath([path, root]) == os.fspath(root)
+        common = os.path.commonpath([path, root])
+        return os.path.normcase(common) == os.path.normcase(os.fspath(root))
     except ValueError:
         return False
+
+
+def load_full_text_roots(
+    connection: sqlite3.Connection, workspace_root: Path
+) -> set[Path]:
+    row = connection.execute(
+        "SELECT value FROM settings WHERE key = ?", (FULL_TEXT_ROOTS_SETTING,)
+    ).fetchone()
+    if row is None:
+        return set()
+    try:
+        stored = json.loads(row[0])
+    except json.JSONDecodeError as exc:
+        raise OfficeOSError("Stored full-text root policy is invalid.") from exc
+    if not isinstance(stored, list) or not all(
+        isinstance(item, str) for item in stored
+    ):
+        raise OfficeOSError("Stored full-text root policy is invalid.")
+    roots = {canonical_path(item) for item in stored}
+    if any(not path_is_under(root, workspace_root) for root in roots):
+        raise OfficeOSError("Stored full-text root is outside the configured workspace root.")
+    return roots
+
+
+def update_full_text_roots(
+    connection: sqlite3.Connection,
+    workspace_root: Path,
+    update: FullTextRootUpdate,
+) -> set[Path]:
+    roots = load_full_text_roots(connection, workspace_root)
+    for raw in update.revocations:
+        root = canonical_path(raw)
+        if not path_is_under(root, workspace_root):
+            raise OfficeOSError(
+                f"Full-text root is outside the configured workspace root: {root}"
+            )
+        roots.discard(root)
+    for raw in update.grants:
+        root = canonical_path(raw)
+        if not root.is_dir():
+            raise OfficeOSError(f"Full-text root is not a directory: {root}")
+        if not path_is_under(root, workspace_root):
+            raise OfficeOSError(
+                f"Full-text root is outside the configured workspace root: {root}"
+            )
+        roots.add(root)
+    if len(roots) > MAX_FULL_TEXT_ROOTS:
+        raise OfficeOSError(
+            f"At most {MAX_FULL_TEXT_ROOTS} persistent full-text roots are allowed per workspace."
+        )
+    serialized = json.dumps(
+        sorted(os.fspath(root) for root in roots), ensure_ascii=False
+    )
+    with connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)",
+            (FULL_TEXT_ROOTS_SETTING, serialized),
+        )
+    return roots
 
 
 def replace_document(
@@ -902,13 +973,39 @@ def purge_deleted(
 
 
 def command_index(args: argparse.Namespace) -> int:
+    workspace_root = canonical_path(args.cwd or os.getcwd())
+    requested_paths = [
+        canonical_path(item)
+        for item in (args.path or [os.fspath(workspace_root)])
+    ]
+    for requested in requested_paths:
+        if not path_is_under(requested, workspace_root):
+            raise OfficeOSError(
+                f"Index path is outside the configured workspace root: {requested}"
+            )
     directory = get_workspace_dir(args.cwd)
-    files, roots = discover_paths(args.path or [args.cwd or os.getcwd()])
+    files, roots = discover_paths([os.fspath(path) for path in requested_paths])
+    escaped = next(
+        (path for path in files if not path_is_under(path, workspace_root)),
+        None,
+    )
+    if escaped is not None:
+        raise OfficeOSError(
+            f"Discovered index file resolves outside the configured workspace root: {escaped}"
+        )
     allow_sensitive = {
         os.path.normcase(os.fspath(canonical_path(item)))
         for item in (args.allow_sensitive_content or [])
     }
     connection = connect_database(directory)
+    full_text_roots = update_full_text_roots(
+        connection,
+        workspace_root,
+        FullTextRootUpdate(
+            grants=tuple(args.grant_full_text_root or []),
+            revocations=tuple(args.revoke_full_text_root or []),
+        ),
+    )
     stats = {
         "discovered": len(files),
         "indexed": 0,
@@ -924,9 +1021,16 @@ def command_index(args: argparse.Namespace) -> int:
             indexed_paths.add(file_fingerprint.path)
             sensitivity, reason = detect_sensitivity(path)
             explicit_allow = file_fingerprint.path in allow_sensitive
+            root_allows_full_text = any(
+                path_is_under(path, root) for root in full_text_roots
+            )
             policy = (
                 "full-text"
-                if not args.metadata_only and (sensitivity == "normal" or explicit_allow)
+                if not args.metadata_only
+                and (
+                    (sensitivity == "normal" and root_allows_full_text)
+                    or explicit_allow
+                )
                 else "metadata-only"
             )
             existing = connection.execute(
@@ -975,6 +1079,7 @@ def command_index(args: argparse.Namespace) -> int:
             "SELECT value FROM settings WHERE key = 'fts_tokenizer'"
         ).fetchone()
         stats["fts_tokenizer"] = tokenizer_row[0] if tokenizer_row else "unknown"
+        stats["full_text_roots"] = len(full_text_roots)
         stats["database"] = os.fspath(directory / "office.db")
         json_print(stats)
     finally:
@@ -984,6 +1089,36 @@ def command_index(args: argparse.Namespace) -> int:
 
 def fts_phrase(text: str) -> str:
     return '"' + text.replace('"', '""') + '"'
+
+
+def filter_current_query_rows(
+    connection: sqlite3.Connection, rows: Sequence[sqlite3.Row]
+) -> list[sqlite3.Row]:
+    current: list[sqlite3.Row] = []
+    stale_document_ids: set[int] = set()
+    for row in rows:
+        try:
+            current_sha256 = fingerprint(row["path"]).sha256
+        except OfficeOSError:
+            current_sha256 = ""
+        if current_sha256 == row["document_sha256"]:
+            current.append(row)
+        else:
+            stale_document_ids.add(int(row["document_id"]))
+    if stale_document_ids:
+        with connection:
+            for document_id in stale_document_ids:
+                connection.execute(
+                    "DELETE FROM chunk_fts WHERE document_id = ?", (document_id,)
+                )
+                connection.execute(
+                    "DELETE FROM chunks WHERE document_id = ?", (document_id,)
+                )
+                connection.execute(
+                    "UPDATE documents SET index_status = 'stale' WHERE id = ?",
+                    (document_id,),
+                )
+    return current
 
 
 def command_query(args: argparse.Namespace) -> int:
@@ -1003,8 +1138,10 @@ def command_query(args: argparse.Namespace) -> int:
         if len(args.text.strip()) >= 3:
             rows = connection.execute(
                 f"""
-                SELECT d.path, d.object_type, c.locator, c.heading, c.text,
-                       c.content_hash, bm25(chunk_fts) AS rank
+                SELECT d.id AS document_id, d.path,
+                       d.sha256 AS document_sha256, d.object_type,
+                       c.locator, c.heading, c.text, c.content_hash,
+                       bm25(chunk_fts) AS rank
                 FROM chunk_fts
                 JOIN chunks c ON c.id = chunk_fts.rowid
                 JOIN documents d ON d.id = c.document_id
@@ -1014,12 +1151,15 @@ def command_query(args: argparse.Namespace) -> int:
                 """,
                 [fts_phrase(args.text.strip()), *parameters, args.limit],
             ).fetchall()
+            rows = filter_current_query_rows(connection, rows)
         if not rows:
             like = f"%{args.text.strip()}%"
             rows = connection.execute(
                 f"""
-                SELECT d.path, d.object_type, c.locator, c.heading, c.text,
-                       c.content_hash, 0.0 AS rank
+                SELECT d.id AS document_id, d.path,
+                       d.sha256 AS document_sha256, d.object_type,
+                       c.locator, c.heading, c.text, c.content_hash,
+                       0.0 AS rank
                 FROM chunks c
                 JOIN documents d ON d.id = c.document_id
                 WHERE (c.text LIKE ? OR c.heading LIKE ? OR d.title LIKE ?)
@@ -1028,6 +1168,7 @@ def command_query(args: argparse.Namespace) -> int:
                 """,
                 [like, like, like, *parameters, args.limit],
             ).fetchall()
+            rows = filter_current_query_rows(connection, rows)
         json_print(
             {
                 "query": args.text,
@@ -1254,18 +1395,40 @@ def validate_candidate(path: Path) -> dict[str, Any]:
     if path.stat().st_size <= 0:
         raise OfficeOSError("Candidate is empty.")
     required_parts = {
-        ".xlsx": "xl/workbook.xml",
-        ".docx": "word/document.xml",
-        ".pptx": "ppt/presentation.xml",
+        ".xlsx": {
+            "[Content_Types].xml",
+            "xl/workbook.xml",
+            "xl/_rels/workbook.xml.rels",
+        },
+        ".docx": {"[Content_Types].xml", "word/document.xml"},
+        ".pptx": {"[Content_Types].xml", "ppt/presentation.xml"},
     }
     try:
         with zipfile.ZipFile(path) as package:
+            members = package.infolist()
+            if len(members) > MAX_PACKAGE_MEMBERS:
+                raise OfficeOSError("Candidate package contains too many parts.")
+            if sum(member.file_size for member in members) > MAX_PACKAGE_UNCOMPRESSED_BYTES:
+                raise OfficeOSError("Candidate package expands beyond the validation limit.")
             bad_member = package.testzip()
             if bad_member:
                 raise OfficeOSError(f"Candidate package has a corrupt part: {bad_member}")
-            required = required_parts[extension]
-            if required not in package.namelist():
-                raise OfficeOSError(f"Candidate package is missing {required}.")
+            names = set(package.namelist())
+            missing = sorted(required_parts[extension] - names)
+            if missing:
+                raise OfficeOSError(
+                    f"Candidate package is missing {', '.join(missing)}."
+                )
+            if extension == ".xlsx" and not any(
+                name.startswith("xl/worksheets/") and name.endswith(".xml")
+                for name in names
+            ):
+                raise OfficeOSError("Candidate workbook has no worksheet part.")
+            if extension == ".pptx" and not any(
+                name.startswith("ppt/slides/slide") and name.endswith(".xml")
+                for name in names
+            ):
+                raise OfficeOSError("Candidate presentation has no slide part.")
     except zipfile.BadZipFile as error:
         raise OfficeOSError("Candidate is not a valid Open XML package.") from error
     return {
@@ -1416,6 +1579,38 @@ def source_unchanged(
     )
 
 
+def require_publish_authority(
+    directory: Path, task_key: str, mode: str
+) -> dict[str, Any]:
+    state = read_run_state(directory)
+    if not state or state.get("task_key") != task_key:
+        raise OfficeOSError(
+            "Publishing requires a matching active Office OS run and explicit write authority."
+        )
+    if state.get("status") not in {"executing", "validating", "publishing"}:
+        raise OfficeOSError("The active Office OS run is not ready to publish.")
+    required_permission = (
+        "scheduled-overwrite" if mode == "scheduled" else "fixed-output-write"
+    )
+    if state.get("permission") != required_permission:
+        raise OfficeOSError(
+            f"Active permission {state.get('permission') or 'none'} does not authorize publishing in {mode} mode."
+        )
+    if state.get("mode") != mode:
+        raise OfficeOSError("Publish mode does not match the active Office OS run.")
+    if mode == "scheduled":
+        lease = read_json(single_flight_path(directory), {})
+        if (
+            not isinstance(lease, dict)
+            or lease.get("run_id") != state.get("run_id")
+            or lease.get("task_key") != task_key
+        ):
+            raise OfficeOSError(
+                "Scheduled publishing requires its matching active single-flight lease."
+            )
+    return state
+
+
 def prepare_stage(candidate: Path, output_directory: Path) -> tuple[Path, bool]:
     if candidate.parent == output_directory and candidate.name.startswith(TEMP_PREFIX):
         return candidate, False
@@ -1453,14 +1648,13 @@ def command_needs_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def command_publish(args: argparse.Namespace) -> int:
-    directory = get_workspace_dir(args.cwd)
+def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
     candidate = canonical_path(args.candidate)
     sources = [canonical_path(item) for item in (args.source or [])]
     primary_source = sources[0] if sources else None
     sources_before = fingerprint_sources(sources)
     task_key = stable_task_key(args.task)
-    active_run = read_run_state(directory)
+    active_run = require_publish_authority(directory, task_key, args.mode)
     if (
         active_run.get("task_key") == task_key
         and active_run.get("source_digest") is not None
@@ -1534,6 +1728,12 @@ def command_publish(args: argparse.Namespace) -> int:
         ):
             candidate.unlink(missing_ok=True)
     return 0
+
+
+def command_publish(args: argparse.Namespace) -> int:
+    directory = get_workspace_dir(args.cwd)
+    with state_lock(directory, timeout=5.0):
+        return publish_candidate(args, directory)
 
 
 def command_cleanup(args: argparse.Namespace) -> int:
@@ -1644,9 +1844,19 @@ def build_parser() -> argparse.ArgumentParser:
     index.add_argument("--path", action="append", help="File or folder; repeatable.")
     index.add_argument("--metadata-only", action="store_true")
     index.add_argument(
+        "--grant-full-text-root",
+        action="append",
+        help="Persist explicit full-text consent for a directory inside this workspace.",
+    )
+    index.add_argument(
+        "--revoke-full-text-root",
+        action="append",
+        help="Remove persistent full-text consent for a directory.",
+    )
+    index.add_argument(
         "--allow-sensitive-content",
         action="append",
-        help="Explicit file path allowed for persistent full-text indexing.",
+        help="Explicit sensitive file path allowed for this indexing operation.",
     )
     index.set_defaults(function=command_index)
 
@@ -1666,7 +1876,11 @@ def build_parser() -> argparse.ArgumentParser:
     begin.add_argument("--task", required=True)
     begin.add_argument("--intent", required=True)
     begin.add_argument("--object", required=True)
-    begin.add_argument("--permission", required=True)
+    begin.add_argument(
+        "--permission",
+        required=True,
+        choices=["read-only", "fixed-output-write", "scheduled-overwrite"],
+    )
     begin.add_argument("--qa", required=True)
     begin.add_argument("--units", type=int, required=True)
     begin.add_argument(

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from collections.abc import Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,6 +143,34 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(len(roots), 1)
         return roots[0]
 
+    def begin_publish_run(
+        self,
+        task: str,
+        sources: Sequence[Path],
+        mode: str = "manual",
+    ) -> dict:
+        arguments = [
+            "--task",
+            task,
+            "--intent",
+            "update",
+            "--object",
+            "office",
+            "--permission",
+            "scheduled-overwrite" if mode == "scheduled" else "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+            "--mode",
+            mode,
+        ]
+        for source in sources:
+            arguments.extend(("--source", os.fspath(source)))
+        state, _ = self.run_core("begin", *arguments)
+        self.assertEqual(state["status"], "executing")
+        return state
+
     def test_index_upserts_queries_chinese_and_purges_deleted_sources(self) -> None:
         workbook = self.workspace / "budget.xlsx"
         document = self.workspace / "plan.docx"
@@ -150,7 +179,13 @@ class CoreCase(unittest.TestCase):
         write_docx(document, "本季優先處理採購資料")
         write_pptx(presentation, "執行摘要與下一步")
 
-        first, _ = self.run_core("index", "--path", os.fspath(self.workspace))
+        first, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
         self.assertEqual(first["discovered"], 3)
         self.assertEqual(first["indexed"], 3)
         self.assertEqual(first["fts_tokenizer"], "trigram")
@@ -180,6 +215,42 @@ class CoreCase(unittest.TestCase):
             )
         finally:
             database.close()
+
+    def test_index_defaults_to_metadata_until_full_text_root_is_granted(self) -> None:
+        workbook = self.workspace / "consent.xlsx"
+        write_xlsx(workbook, "需要明確同意才能保存")
+
+        first, _ = self.run_core("index", "--path", os.fspath(self.workspace))
+        self.assertEqual(first["metadata_only"], 1)
+        before_consent, _ = self.run_core("query", "--text", "明確同意")
+        self.assertEqual(before_consent["count"], 0)
+
+        granted, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+        self.assertEqual(granted["indexed"], 1)
+        after_consent, _ = self.run_core("query", "--text", "明確同意")
+        self.assertEqual(after_consent["count"], 1)
+
+        repeated, _ = self.run_core("index", "--path", os.fspath(self.workspace))
+        self.assertEqual(repeated["unchanged"], 1)
+
+    def test_index_rejects_paths_outside_the_configured_workspace_root(self) -> None:
+        outside = self.base / "outside"
+        outside.mkdir()
+        write_xlsx(outside / "private.xlsx", "不屬於目前工作區")
+
+        result, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(outside),
+            expected=2,
+        )
+        self.assertIn("outside the configured workspace root", result["error"])
 
     def test_sensitive_and_macro_files_are_metadata_only(self) -> None:
         confidential = self.workspace / "機密薪資.xlsx"
@@ -223,12 +294,140 @@ class CoreCase(unittest.TestCase):
             database.close()
         self.assertEqual(count, 2)
 
+    def test_query_omits_chunks_when_source_changed_since_index(self) -> None:
+        workbook = self.workspace / "stale.xlsx"
+        write_xlsx(workbook, "原始金額120萬")
+        self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+
+        write_xlsx(workbook, "新金額999萬")
+        stale, _ = self.run_core("query", "--text", "原始金額")
+        self.assertEqual(stale["count"], 0)
+
+    def test_read_only_run_cannot_publish(self) -> None:
+        source = self.workspace / "source.xlsx"
+        candidate = self.workspace / "candidate.xlsx"
+        write_xlsx(source, "source")
+        write_xlsx(candidate, "candidate")
+        self.run_core(
+            "begin",
+            "--task",
+            "唯讀檢查",
+            "--source",
+            os.fspath(source),
+            "--intent",
+            "inspect",
+            "--object",
+            "excel",
+            "--permission",
+            "read-only",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+        )
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "唯讀檢查",
+            expected=2,
+        )
+        self.assertIn("does not authorize publishing", result["error"])
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+    def test_minimal_open_xml_package_cannot_replace_previous_output(self) -> None:
+        source = self.workspace / "source.xlsx"
+        candidate = self.workspace / "candidate.xlsx"
+        write_xlsx(source, "source")
+        write_xlsx(candidate, "valid-output")
+        self.begin_publish_run("套件驗證", (source,))
+        first, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "套件驗證",
+        )
+        target = Path(first["target"])
+        previous = target.read_bytes()
+
+        minimal = self.workspace / "minimal.xlsx"
+        with zipfile.ZipFile(minimal, "w", zipfile.ZIP_DEFLATED) as package:
+            package.writestr("xl/workbook.xml", "<workbook/>")
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(minimal),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "套件驗證",
+            expected=2,
+        )
+        self.assertIn("[Content_Types].xml", result["error"])
+        self.assertEqual(target.read_bytes(), previous)
+
+    def test_scheduled_publish_requires_its_active_single_flight_lease(self) -> None:
+        source = self.workspace / "source.xlsx"
+        candidate = self.workspace / "candidate.xlsx"
+        write_xlsx(source, "source")
+        write_xlsx(candidate, "candidate")
+        self.begin_publish_run("排程鎖", (source,), mode="scheduled")
+        (self.workspace_data() / "single-flight.lock").unlink()
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "排程鎖",
+            "--mode",
+            "scheduled",
+            expected=2,
+        )
+        self.assertIn("single-flight lease", result["error"])
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+    def test_pdf_is_metadata_readable_but_never_a_publish_candidate(self) -> None:
+        pdf = self.workspace / "review.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        indexed, _ = self.run_core("index", "--path", os.fspath(pdf))
+        self.assertEqual(indexed["metadata_only"], 1)
+
+        self.begin_publish_run("PDF 唯讀", (pdf,))
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(pdf),
+            "--source",
+            os.fspath(pdf),
+            "--task",
+            "PDF 唯讀",
+            expected=2,
+        )
+        self.assertIn("Writable candidates must be", result["error"])
+
     def test_scheduled_publish_keeps_three_backups_and_unchanged_is_noop(self) -> None:
         source = self.workspace / "source.xlsx"
         candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source-0")
         write_xlsx(candidate, "output-0")
 
+        self.begin_publish_run("季度整理", (source,), mode="scheduled")
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -243,10 +442,12 @@ class CoreCase(unittest.TestCase):
         target = Path(first["target"])
         self.assertTrue(target.is_file())
         self.assertIn("output-0", xlsx_text(target))
+        self.run_core("complete", "--summary", "published")
 
         for number in range(1, 5):
             write_xlsx(source, f"source-{number}")
             write_xlsx(candidate, f"output-{number}")
+            self.begin_publish_run("季度整理", (source,), mode="scheduled")
             self.run_core(
                 "publish",
                 "--candidate",
@@ -258,6 +459,7 @@ class CoreCase(unittest.TestCase):
                 "--mode",
                 "scheduled",
             )
+            self.run_core("complete", "--summary", f"published-{number}")
 
         self.assertIn("output-4", xlsx_text(target))
         self.assertIn("output-3", xlsx_text(Path(f"{target}.bak.1")))
@@ -271,6 +473,7 @@ class CoreCase(unittest.TestCase):
             if path == target or ".bak." in path.name
         }
         write_xlsx(candidate, "should-not-publish")
+        self.begin_publish_run("季度整理", (source,), mode="scheduled")
         unchanged, _ = self.run_core(
             "publish",
             "--candidate",
@@ -283,6 +486,7 @@ class CoreCase(unittest.TestCase):
             "scheduled",
         )
         self.assertEqual(unchanged["status"], "unchanged")
+        self.run_core("complete", "--summary", "unchanged")
         after = {
             path.name: path.read_bytes()
             for path in target.parent.iterdir()
@@ -295,6 +499,7 @@ class CoreCase(unittest.TestCase):
         candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source")
         write_xlsx(candidate, "good-output")
+        self.begin_publish_run("人工更新", (source,))
         result, _ = self.run_core(
             "publish",
             "--candidate",
@@ -330,6 +535,9 @@ class CoreCase(unittest.TestCase):
         write_xlsx(workbook, "workbook-v1")
         write_docx(document, "document-v1")
         write_xlsx(candidate, "combined-v1")
+        self.begin_publish_run(
+            "跨檔案整合", (workbook, document), mode="scheduled"
+        )
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -344,6 +552,7 @@ class CoreCase(unittest.TestCase):
             "scheduled",
         )
         target = Path(first["target"])
+        self.run_core("complete", "--summary", "published")
 
         unchanged, _ = self.run_core(
             "needs-run",
@@ -379,6 +588,7 @@ class CoreCase(unittest.TestCase):
         outside = self.workspace / "outside.xlsx"
         write_xlsx(source, "source")
         write_xlsx(candidate, "candidate")
+        self.begin_publish_run("固定位置", (source,))
         result, _ = self.run_core(
             "publish",
             "--candidate",
@@ -399,6 +609,7 @@ class CoreCase(unittest.TestCase):
         candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source-v1")
         write_xlsx(candidate, "output-v1")
+        self.begin_publish_run("來源保護", (source,))
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -410,6 +621,7 @@ class CoreCase(unittest.TestCase):
         )
         target = Path(first["target"])
         previous = target.read_bytes()
+        self.run_core("complete", "--summary", "baseline")
 
         self.run_core(
             "begin",
