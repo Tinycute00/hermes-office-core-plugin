@@ -593,6 +593,66 @@ class OfficeCLICase(unittest.TestCase):
                 elif linked.is_symlink():
                     linked.unlink()
 
+    def test_manager_refuses_every_linked_runtime_ancestor(self) -> None:
+        manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
+        lock = manager.load_lock()
+        operations = {
+            "status": lambda: manager.runtime_status(lock),
+            "prune": lambda: manager.prune_old_versions("1.0.135"),
+            "uninstall": manager.uninstall_runtime,
+            "install": lambda: manager.install_runtime(True),
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            for ancestor in ("plugin-data", "runtimes", "officecli"):
+                for operation_name, operation in operations.items():
+                    with self.subTest(ancestor=ancestor, operation=operation_name):
+                        case = base / f"{ancestor}-{operation_name}"
+                        data_root = case / "plugin-data"
+                        outside = case / "outside"
+                        if ancestor == "plugin-data":
+                            linked = data_root
+                            version = outside / "runtimes" / "officecli" / "0.9.0"
+                        elif ancestor == "runtimes":
+                            linked = data_root / "runtimes"
+                            version = outside / "officecli" / "0.9.0"
+                        else:
+                            linked = data_root / "runtimes" / "officecli"
+                            version = outside / "0.9.0"
+                        linked.parent.mkdir(parents=True)
+                        version.mkdir(parents=True)
+                        sentinel = version / "sentinel.bin"
+                        sentinel.write_bytes(b"outside")
+                        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+                        if os.name == "nt":
+                            completed = subprocess.run(
+                                ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                                text=True,
+                                capture_output=True,
+                                check=False,
+                            )
+                            self.assertEqual(completed.returncode, 0, completed.stderr)
+                        else:
+                            linked.symlink_to(outside, target_is_directory=True)
+                        try:
+                            with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(data_root)}):
+                                with mock.patch.object(
+                                    runtime,
+                                    "download_asset",
+                                    side_effect=AssertionError("linked install reached download"),
+                                ):
+                                    with self.assertRaises(manager.OfficeCLIManagerError):
+                                        operation()
+                            self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+                            self.assertTrue(os.path.lexists(linked))
+                        finally:
+                            if os.path.lexists(linked):
+                                if os.name == "nt":
+                                    os.rmdir(linked)
+                                else:
+                                    linked.unlink()
+
     def test_uninstall_removes_only_managed_versions(self) -> None:
         manager = load_manager()
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -630,6 +690,73 @@ class OfficeCLICase(unittest.TestCase):
             self.assertFalse(status["installed"])
             self.assertEqual(status["version"], "1.0.135")
             self.assertFalse(data_root.exists())
+
+    def test_adapter_rejects_linked_runtime_ancestors_before_checksum(self) -> None:
+        self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
+        manager = load_manager()
+        lock = manager.load_lock()
+        asset = lock["assets"][manager.current_asset_key()]
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            for ancestor in ("plugin-data", "runtimes", "officecli"):
+                with self.subTest(ancestor=ancestor):
+                    case = base / ancestor
+                    data_root = case / "plugin-data"
+                    outside = case / "outside"
+                    if ancestor == "plugin-data":
+                        linked = data_root
+                        binary = (
+                            outside
+                            / "runtimes"
+                            / "officecli"
+                            / "1.0.135"
+                            / asset["filename"]
+                        )
+                    elif ancestor == "runtimes":
+                        linked = data_root / "runtimes"
+                        binary = outside / "officecli" / "1.0.135" / asset["filename"]
+                    else:
+                        linked = data_root / "runtimes" / "officecli"
+                        binary = outside / "1.0.135" / asset["filename"]
+                    linked.parent.mkdir(parents=True)
+                    binary.parent.mkdir(parents=True)
+                    binary.write_bytes(b"outside-runtime")
+                    before = hashlib.sha256(binary.read_bytes()).hexdigest()
+                    if os.name == "nt":
+                        created = subprocess.run(
+                            ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                            text=True,
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(created.returncode, 0, created.stderr)
+                    else:
+                        linked.symlink_to(outside, target_is_directory=True)
+                    try:
+                        environment = os.environ.copy()
+                        environment["PLUGIN_DATA"] = os.fspath(data_root)
+                        completed = subprocess.run(
+                            [NODE or "node", os.fspath(LAUNCHER)],
+                            cwd=ROOT,
+                            env=environment,
+                            input="",
+                            text=True,
+                            encoding="utf-8",
+                            capture_output=True,
+                            check=False,
+                        )
+                        self.assertEqual(completed.returncode, 2)
+                        self.assertIn("linked", completed.stderr)
+                        self.assertIn("invalid", completed.stderr)
+                        self.assertNotIn("checksum mismatch", completed.stderr)
+                        self.assertEqual(hashlib.sha256(binary.read_bytes()).hexdigest(), before)
+                        self.assertTrue(os.path.lexists(linked))
+                    finally:
+                        if os.path.lexists(linked):
+                            if os.name == "nt":
+                                os.rmdir(linked)
+                            else:
+                                linked.unlink()
 
     def test_manager_detects_a_tampered_managed_binary(self) -> None:
         manager = load_manager()

@@ -49,9 +49,12 @@ def load_lock() -> dict:  # noqa: DICT_OK
 
 def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
-    if configured:
-        return Path(configured).expanduser().resolve()
-    return (Path(tempfile.gettempdir()) / "office-os-plugin-data").resolve()
+    selected = (
+        Path(configured).expanduser()
+        if configured
+        else Path(tempfile.gettempdir()) / "office-os-plugin-data"
+    )
+    return Path(os.path.abspath(os.fspath(selected)))
 
 
 def normalized_arch(machine: str | None = None) -> str:
@@ -95,7 +98,8 @@ def selected_asset(lock: dict) -> tuple[str, dict]:
 
 
 def managed_runtime_root(data_root: Path | None = None) -> Path:
-    return (data_root or plugin_data_root()).resolve() / "runtimes" / "officecli"
+    selected = data_root or plugin_data_root()
+    return Path(os.path.abspath(os.fspath(selected))) / "runtimes" / "officecli"
 
 
 def managed_binary_path(lock: dict, asset: dict, data_root: Path | None = None) -> Path:
@@ -103,15 +107,43 @@ def managed_binary_path(lock: dict, asset: dict, data_root: Path | None = None) 
 
 
 def is_linklike(path: Path) -> bool:
-    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+        return True
+    try:
+        attributes = path.lstat().st_file_attributes
+    except (AttributeError, FileNotFoundError, OSError):
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def validate_runtime_ancestors(
+    data_root: Path | None = None,
+    version: str | None = None,
+) -> Path:
+    root = managed_runtime_root(data_root)
+    data = root.parents[1]
+    components = [data, data / "runtimes", root]
+    if version is not None:
+        components.append(root / version)
+    real_data: Path | None = None
+    for component in components:
+        if not os.path.lexists(component):
+            continue
+        if is_linklike(component) or not component.is_dir():
+            raise OfficeCLIManagerError("Managed OfficeCLI runtime path is linked or invalid.")
+        if real_data is None:
+            real_data = data.resolve(strict=True)
+        try:
+            component.resolve(strict=True).relative_to(real_data)
+        except ValueError:
+            raise OfficeCLIManagerError("Managed OfficeCLI runtime path escapes plugin data.") from None
+    return root
 
 
 def validate_version_siblings(current_version: str, data_root: Path | None = None) -> list[Path]:
-    root = managed_runtime_root(data_root)
+    root = validate_runtime_ancestors(data_root)
     if not root.exists():
         return []
-    if is_linklike(root) or not root.is_dir():
-        raise OfficeCLIManagerError("Managed OfficeCLI runtime root is linked or invalid.")
     old: list[Path] = []
     for child in root.iterdir():
         if is_linklike(child) or not child.is_dir():
@@ -122,8 +154,8 @@ def validate_version_siblings(current_version: str, data_root: Path | None = Non
 
 
 def assert_ordinary_binary(binary: Path) -> None:
-    root = binary.parent.parent
-    if is_linklike(root) or is_linklike(binary.parent) or is_linklike(binary):
+    validate_runtime_ancestors(binary.parents[3], binary.parent.name)
+    if is_linklike(binary):
         raise OfficeCLIManagerError("Managed OfficeCLI binary path must not contain links.")
     try:
         mode = binary.lstat().st_mode
@@ -145,6 +177,7 @@ def runtime_status(lock: dict | None = None, data_root: Path | None = None) -> d
     value = lock or load_lock()
     key, asset = selected_asset(value)
     target = managed_binary_path(value, asset, data_root)
+    validate_runtime_ancestors(data_root, str(value["version"]))
     base = {
         "version": value["version"],
         "asset": key,
@@ -218,6 +251,7 @@ def install_runtime(accept_download: bool) -> dict:  # noqa: DICT_OK
     _, asset = selected_asset(lock)
     target = Path(status["path"])
     target.parent.mkdir(parents=True, exist_ok=True)
+    validate_runtime_ancestors(version=str(lock["version"]))
     temporary = target.with_name(f".{target.stem}.{os.getpid()}.download{target.suffix}")
     temporary.unlink(missing_ok=True)
     try:

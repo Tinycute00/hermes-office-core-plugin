@@ -81,15 +81,21 @@ function contained(rootPath, candidate) {
 function verifyManagedRuntime() {
   const lock = loadLock();
   const { asset, binary } = managedBinary(lock);
+  const dataRoot = pluginDataRoot();
+  const runtimesRoot = path.join(dataRoot, "runtimes");
   const runtimeRoot = path.dirname(path.dirname(binary));
-  for (const candidate of [runtimeRoot, path.dirname(binary), binary]) {
-    if (!fs.existsSync(candidate) || linklike(candidate)) {
+  const versionRoot = path.dirname(binary);
+  for (const candidate of [dataRoot, runtimesRoot, runtimeRoot, versionRoot]) {
+    if (!fs.existsSync(candidate) || linklike(candidate) || !fs.lstatSync(candidate).isDirectory()) {
       throw new RuntimeIntegrityError("managed runtime is missing, linked, or invalid");
     }
   }
+  if (!fs.existsSync(binary) || linklike(binary)) {
+    throw new RuntimeIntegrityError("managed runtime is missing, linked, or invalid");
+  }
   const status = fs.lstatSync(binary);
   if (!status.isFile()) throw new RuntimeIntegrityError("managed runtime is not an ordinary file");
-  const realRoot = fs.realpathSync.native(runtimeRoot);
+  const realRoot = fs.realpathSync.native(dataRoot);
   const realBinary = fs.realpathSync.native(binary);
   if (!contained(realRoot, realBinary)) throw new RuntimeIntegrityError("managed runtime canonical path escapes its root");
   const actual = crypto.createHash("sha256").update(fs.readFileSync(binary)).digest("hex");
