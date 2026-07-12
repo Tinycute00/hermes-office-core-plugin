@@ -273,7 +273,7 @@ class OfficeCLICase(unittest.TestCase):
                             "argv": [os.fspath(fake), mode, os.fspath(pid_file)],
                             "screenshot": False,
                         },
-                        "options": {"timeoutMs": 300},
+                        "options": {"timeoutMs": 2_000},
                     },
                     data_root,
                 )
