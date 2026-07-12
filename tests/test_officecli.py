@@ -18,6 +18,7 @@ MANAGER = ROOT / "scripts" / "officecli_manager.py"
 LOCK = ROOT / "vendor" / "officecli.lock.json"
 LAUNCHER = ROOT / "scripts" / "officecli-mcp.cjs"
 JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
+POLICY = ROOT / "scripts" / "officecli-mcp" / "policy.cjs"
 NODE = shutil.which("node")
 
 
@@ -43,6 +44,33 @@ def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
         "if(args.fail==='internal')throw new Error('boom');"
         "return {content:[{type:'text',text:'ok'}]};}});"
     )
+
+
+def run_policy(arguments: dict, data_root: Path) -> dict:
+    script = (
+        "const { TOOL, parseToolArguments } = require(process.argv[1]);"
+        "let input='';process.stdin.setEncoding('utf8');"
+        "process.stdin.on('data',chunk=>input+=chunk);"
+        "process.stdin.on('end',()=>{try{"
+        "const value=JSON.parse(input);"
+        "process.stdout.write(JSON.stringify(value.schema?TOOL:parseToolArguments(value)));"
+        "}catch(error){process.stdout.write(JSON.stringify({error:error.message}));}});"
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_DATA"] = os.fspath(data_root)
+    completed = subprocess.run(
+        [NODE or "node", "-e", script, os.fspath(POLICY)],
+        cwd=ROOT,
+        env=environment,
+        input=json.dumps(arguments),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return json.loads(completed.stdout)
     return subprocess.run(
         [NODE or "node", "-e", self_test, os.fspath(JSONRPC)],
         cwd=ROOT,
@@ -53,6 +81,116 @@ def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
 
 
 class OfficeCLICase(unittest.TestCase):
+    def test_tool_schema_is_array_only(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            tool = run_policy({"schema": True}, Path(temporary))
+        self.assertEqual(tool["name"], "officecli")
+        self.assertEqual(tool["inputSchema"]["required"], ["command"])
+        self.assertFalse(tool["inputSchema"]["additionalProperties"])
+        command = tool["inputSchema"]["properties"]["command"]
+        self.assertEqual(command["type"], "array")
+        self.assertEqual(command["items"], {"type": "string"})
+        self.assertEqual((command["minItems"], command["maxItems"]), (1, 128))
+
+    def test_allowed_and_denied_grammar_families(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            candidate = candidate_root / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            image = candidate_root / "image.png"
+            image.write_bytes(b"image")
+            allowed = [
+                ["validate", os.fspath(candidate), "--json"],
+                ["get", os.fspath(candidate), "/Sheet1/A1", "--depth", "2"],
+                ["query", os.fspath(candidate), "cell:contains(Q1)", "--find", "Q1", "--compact", "--fields", "path,text"],
+                ["view", os.fspath(candidate), "text", "--start", "1", "--end", "5", "--max-lines", "50", "--cols", "A,B", "--range", "A1:B5"],
+                ["view", os.fspath(candidate), "stats"],
+                ["view", os.fspath(candidate), "issues", "--limit", "10"],
+                ["view", os.fspath(candidate), "screenshot", "--page", "1", "--screenshot-width", "640", "--screenshot-height", "480"],
+                ["set", os.fspath(candidate), "/Sheet1/A1", "--prop", "text=done", "--find", "old", "--replace", "new"],
+                ["add", os.fspath(candidate), "/Sheet1", "--type", "image", "--index", "0", "--prop", f"src={image}"],
+                ["remove", os.fspath(candidate), "/Sheet1/A1", "--shift", "left", "--prop", "style"],
+                ["move", os.fspath(candidate), "/Sheet1/A1", "--to", "/Sheet1", "--after", "/Sheet1/A2", "--prop", "text=done"],
+                ["swap", os.fspath(candidate), "/Sheet1/A1", "/Sheet1/A2"],
+            ]
+            for command in allowed:
+                with self.subTest(command=command):
+                    result = run_policy({"command": command}, data_root)
+                    self.assertNotIn("error", result)
+                    self.assertEqual(result["argv"][0], command[0])
+                    self.assertNotIn("mcp", result["argv"])
+            denied = [
+                {"command": "validate candidate.xlsx"},
+                {"argv": ["validate", os.fspath(candidate)]},
+                {"command": ["mcp"]},
+                {"command": ["create", os.fspath(candidate)]},
+                {"command": ["view", os.fspath(candidate), "html"]},
+                {"command": ["validate", os.fspath(candidate), "--force"]},
+                {"command": ["validate", os.fspath(candidate), "--"]},
+                {"command": ["@response"]},
+                {"command": ["get", os.fspath(candidate), "selected"]},
+                {"command": ["set", os.fspath(candidate), "/A1", "--prop", "output=elsewhere"]},
+                {"command": ["add", os.fspath(candidate), "/", "--type", "image", "--from", "/A1"]},
+                {"command": ["move", os.fspath(candidate), "/A1", "--index", "1", "--after", "/A2"]},
+                {"command": ["validate", "-"]},
+                {"command": ["validate", f"{candidate}\0bad"]},
+            ]
+            denied.extend(
+                {"command": [verb, os.fspath(candidate)]}
+                for verb in (
+                    "config", "install", "skills", "plugins", "resident", "watch",
+                    "server", "import", "merge", "raw", "raw-set", "add-part",
+                    "refresh", "save", "close", "open", "goto", "mark", "dump", "batch",
+                )
+            )
+            denied.extend(
+                {"command": ["view", os.fspath(candidate), "text", option]}
+                for option in ("--browser", "--out", "-o", "--grid", "--render", "--page-count")
+            )
+            for arguments in denied:
+                with self.subTest(arguments=arguments):
+                    self.assertIn("error", run_policy(arguments, data_root))
+
+    def test_candidate_containment_rejects_escape_prefix_and_links(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            outside = data_root / "officecli-candidates-evil"
+            outside.mkdir()
+            sentinel = outside / "sentinel.xlsx"
+            sentinel.write_bytes(b"outside")
+            linked = candidate_root / "linked"
+            if os.name == "nt":
+                completed = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            else:
+                linked.symlink_to(outside, target_is_directory=True)
+            try:
+                paths = [
+                    sentinel,
+                    candidate_root / ".." / "officecli-candidates-evil" / "sentinel.xlsx",
+                    linked / "sentinel.xlsx",
+                ]
+                before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+                for candidate in paths:
+                    result = run_policy({"command": ["validate", os.fspath(candidate)]}, data_root)
+                    self.assertIn("error", result)
+                self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+            finally:
+                if os.name == "nt" and linked.exists():
+                    os.rmdir(linked)
+                elif linked.is_symlink():
+                    linked.unlink()
+
     def test_jsonrpc_lifecycle_errors_notifications_and_recovery(self) -> None:
         messages = [
             {"jsonrpc": "2.0", "id": 1, "method": "ping"},
