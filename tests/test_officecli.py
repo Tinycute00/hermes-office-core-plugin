@@ -19,6 +19,7 @@ LOCK = ROOT / "vendor" / "officecli.lock.json"
 LAUNCHER = ROOT / "scripts" / "officecli-mcp.cjs"
 JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
 POLICY = ROOT / "scripts" / "officecli-mcp" / "policy.cjs"
+RUNNER = ROOT / "scripts" / "officecli-mcp" / "runner.cjs"
 NODE = shutil.which("node")
 
 
@@ -71,6 +72,51 @@ def run_policy(arguments: dict, data_root: Path) -> dict:
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
     return json.loads(completed.stdout)
+
+
+def run_runner(configuration: dict, data_root: Path) -> dict:
+    script = (
+        "const runner=require(process.argv[1]);let input='';"
+        "process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);"
+        "process.stdin.on('end',async()=>{const c=JSON.parse(input);try{"
+        "if(c.constants){process.stdout.write(JSON.stringify(runner.CONSTANTS));return;}"
+        "if(c.environment){process.stdout.write(JSON.stringify(runner.childEnvironment()));return;}"
+        "const result=await runner.runTool(process.execPath,c.parsed,c.options||{});"
+        "process.stdout.write(JSON.stringify(result));"
+        "}catch(error){process.stdout.write(JSON.stringify({error:error.message}));}});"
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_DATA"] = os.fspath(data_root)
+    completed = subprocess.run(
+        [NODE or "node", "-e", script, os.fspath(RUNNER)],
+        cwd=ROOT,
+        env=environment,
+        input=json.dumps(configuration),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return json.loads(completed.stdout)
+
+
+def process_exists(pid: int) -> bool:
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        return str(pid) in completed.stdout and "No tasks" not in completed.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
     return subprocess.run(
         [NODE or "node", "-e", self_test, os.fspath(JSONRPC)],
         cwd=ROOT,
@@ -81,6 +127,84 @@ def run_policy(arguments: dict, data_root: Path) -> dict:
 
 
 class OfficeCLICase(unittest.TestCase):
+    def test_runner_kills_tree_on_timeout_and_overflow(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            (data_root / "officecli-candidates").mkdir(parents=True)
+            fake = base / "fake-runner.cjs"
+            fake.write_text(
+                "const {spawn}=require('node:child_process');const fs=require('node:fs');"
+                "const mode=process.argv[2],pidFile=process.argv[3];"
+                "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});"
+                "fs.writeFileSync(pidFile,String(child.pid));"
+                "if(mode==='overflow')process.stdout.write(Buffer.alloc(9*1024*1024,120));"
+                "setInterval(()=>{},1000);",
+                encoding="utf-8",
+            )
+            constants = run_runner({"constants": True}, data_root)
+            self.assertEqual(constants["normalTimeoutMs"], 60_000)
+            self.assertEqual(constants["screenshotTimeoutMs"], 120_000)
+            self.assertEqual(constants["streamLimitBytes"], 8 * 1024 * 1024)
+            self.assertEqual(constants["pngLimitBytes"], 16 * 1024 * 1024)
+            environment = run_runner({"environment": True}, data_root)
+            self.assertEqual(
+                {key: value for key, value in environment.items() if key.startswith("OFFICECLI_")},
+                {
+                    "OFFICECLI_SKIP_UPDATE": "1",
+                    "OFFICECLI_NO_AUTO_INSTALL": "1",
+                    "OFFICECLI_NO_AUTO_RESIDENT": "1",
+                },
+            )
+            for mode in ("hang", "overflow"):
+                pid_file = base / f"{mode}.pid"
+                result = run_runner(
+                    {
+                        "parsed": {
+                            "argv": [os.fspath(fake), mode, os.fspath(pid_file)],
+                            "screenshot": False,
+                        },
+                        "options": {"timeoutMs": 300},
+                    },
+                    data_root,
+                )
+                self.assertTrue(result["isError"])
+                self.assertLess(len(result["content"][0]["text"]), 20_000)
+                pid = int(pid_file.read_text(encoding="utf-8"))
+                self.assertFalse(process_exists(pid), f"grandchild {pid} survived {mode}")
+
+    def test_screenshot_success_and_failure_cleanup(self) -> None:
+        png = b"\x89PNG\r\n\x1a\n" + b"minimal"
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            fake = base / "fake-screenshot.cjs"
+            fake.write_text(
+                "const fs=require('node:fs');const args=process.argv.slice(2);"
+                "const out=args[args.indexOf('--out')+1];"
+                "if(args.includes('fail')){fs.writeFileSync(out,'bad');process.exit(2);}"
+                "fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a6d696e696d616c','hex'));",
+                encoding="utf-8",
+            )
+            success = run_runner(
+                {"parsed": {"argv": [os.fspath(fake), "success"], "screenshot": True}},
+                data_root,
+            )
+            self.assertFalse(success.get("isError", False))
+            self.assertEqual(len(success["content"]), 1)
+            image = success["content"][0]
+            self.assertEqual((image["type"], image["mimeType"]), ("image", "image/png"))
+            self.assertEqual(__import__("base64").b64decode(image["data"]), png)
+            failure = run_runner(
+                {"parsed": {"argv": [os.fspath(fake), "fail"], "screenshot": True}},
+                data_root,
+            )
+            self.assertTrue(failure["isError"])
+            leftovers = [path for path in candidate_root.rglob("*") if ".officecli-shot-" in path.name]
+            self.assertEqual(leftovers, [])
+
     def test_tool_schema_is_array_only(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             tool = run_policy({"schema": True}, Path(temporary))
