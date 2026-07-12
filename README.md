@@ -25,7 +25,33 @@ Source files are never overwritten. Results go to a sibling folder named `Office
 
 ## Local knowledge map
 
-Each workspace gets a private SQLite FTS5 index under Codex's plugin data directory. Normal Office documents can be indexed by text. Confidential, restricted, encrypted, signed, or macro-enabled files default to metadata and hashes only. Deleted files are removed from the index, and completed-run events are pruned.
+Each workspace gets a private SQLite FTS5 index under Codex's plugin data directory.
+Indexing is metadata-only until the owner explicitly grants persistent full-text
+access to a workspace root; index paths outside the active workspace are rejected.
+Confidential, restricted, encrypted, signed, or macro-enabled files remain
+metadata-only unless the exact file is explicitly allowed for that indexing
+operation. Deleted files are removed from the index, and completed-run events are
+pruned.
+
+## Managed OfficeCLI adapter
+
+Office OS includes an optional local adapter for structured Word, Excel, and PowerPoint edits, validation, and headless PNG review. It exposes exactly one `officecli` tool with array-only commands and uses a plugin-managed OfficeCLI `1.0.135` executable pinned to source commit `d2d9c60f44537004c3e1f46680c24ea38d9659c2` and locked release SHA-256 values.
+
+No executable is downloaded until the owner approves it. After approval, the skill runs the idempotent manager once:
+
+```powershell
+python scripts/officecli_manager.py install --accept-download
+```
+
+The manager keeps one verified version under plugin data and prunes only ordinary old-version siblings after successful verification. It does not place the executable on `PATH`, install another skill, register another MCP server, or mutate user OfficeCLI configuration.
+
+The adapter derives the fixed `PLUGIN_DATA/officecli-candidates` staging root itself. Copy a source into that root, operate only on the candidate, then validate and publish through the Office OS core to the stable sibling `Office OS Output` target. Callers cannot choose the candidate root or screenshot destination. Normal commands are limited to 60 seconds, screenshots to 120 seconds, and both process streams and returned PNG data are bounded.
+
+Each allowlisted child command receives update, installation, and resident suppression in its child-command environment only. The adapter never starts OfficeCLI's upstream MCP mode or calls an unverified executable directly, and it rechecks the pinned SHA before every call. These controls do not change persistent user settings or promise behavior outside the adapter.
+
+If installation is declined, or the runtime/adapter is missing, unsupported, corrupt, linked, tampered, or unsuitable for a document, the call fails closed and the workflow uses Codex's installed spreadsheet, document, presentation, or PDF capabilities. The candidate/source split, stable output, manual no-history rule, three scheduled backups, and PDF read-only rule remain unchanged.
+
+OfficeCLI is Apache-2.0 software maintained by iOfficeAI. The pinned [license](https://github.com/iOfficeAI/OfficeCLI/blob/d2d9c60f44537004c3e1f46680c24ea38d9659c2/LICENSE) and required [NOTICE](https://github.com/iOfficeAI/OfficeCLI/blob/d2d9c60f44537004c3e1f46680c24ea38d9659c2/NOTICE) remain linked in the runtime lock.
 
 ## Install for local testing
 
@@ -42,6 +68,7 @@ After the result is accepted, Office OS offers to create a recurring local Codex
 ```powershell
 python -m unittest discover -s tests -v
 python skills/office-os/scripts/office_os.py doctor
+python scripts/officecli_manager.py status
 ```
 
 The implementation follows the current OpenAI plugin, skill, hook, and scheduled-task documentation and borrows OMO's intent-routing and bounded-continuation ideas while adapting them to local office files.

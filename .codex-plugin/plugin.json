@@ -1,7 +1,7 @@
 {
   "name": "office-os",
-  "version": "0.1.0",
-  "description": "Local-first Office workflow orchestration for Excel, Word, PowerPoint, PDF, and recurring office tasks.",
+  "version": "0.2.0",
+  "description": "Local-first Office workflows with immutable sources, managed candidate editing, bounded publishing, and optional recurrence.",
   "author": {
     "name": "Tinycute00",
     "url": "https://github.com/Tinycute00"
@@ -11,10 +11,11 @@
   "license": "MIT",
   "keywords": ["office", "excel", "word", "powerpoint", "pdf", "workflow"],
   "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Office OS",
-    "shortDescription": "Run local Office work from plain-language requests.",
-    "longDescription": "Classifies an office request, asks only the decisions it needs, processes local Excel, Word, PowerPoint, and PDF files in efficient chunks, publishes stable outputs without changing sources, and can turn accepted work into a recurring Codex task.",
+    "shortDescription": "Run bounded local Office work from plain language.",
+    "longDescription": "Classifies an Office request, asks one short owner question at a time, edits only managed candidates, processes Excel, Word, PowerPoint, and read-only PDF files in semantic units, publishes one stable output without changing sources, and offers recurrence only after acceptance.",
     "developerName": "Tinycute00",
     "category": "Productivity",
     "capabilities": ["Read", "Write", "Interactive"],
