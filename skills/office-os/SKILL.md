@@ -53,7 +53,7 @@ For `.xlsx`, `.docx`, or `.pptx` authoring and rendered QA, quietly check the ma
 
     python "<plugin-root>/scripts/officecli_manager.py" status
 
-If it is installed, prefer the managed local `officecli` adapter for deterministic structure edits, JSON inspection, validation, and screenshots. Before any adapter call, create a new candidate or copy the source into the fixed `PLUGIN_DATA/officecli-candidates` staging root; pass only that candidate, never a source. If the runtime is missing, ask one short question before downloading the executable. After approval, install the pinned runtime once with `install --accept-download`; the operation is checksum-verified and idempotent. If approval is declined or the adapter is unavailable, continue with Codex's installed spreadsheet, document, presentation, and PDF capabilities, still authoring a candidate and publishing only through the Office OS core.
+If it is installed, prefer the managed local `officecli` adapter for deterministic structure edits, JSON inspection, validation, and screenshots. Before any adapter call, create a new candidate or copy the source into the fixed `PLUGIN_DATA/officecli-candidates` staging root; pass only that candidate, never a source. The core removes a managed candidate after successful publish, completion, or an explicitly failed run; a failed publish keeps it only while revision remains active. Every new run and explicit cleanup reclaims candidates older than 24 hours and enforces at most 32 files and 2 GiB without following links. If the runtime is missing, ask one short question before downloading the executable. After approval, install the pinned runtime once with `install --accept-download`; the operation is checksum-verified and idempotent. If approval is declined or the adapter is unavailable, continue with Codex's installed spreadsheet, document, presentation, and PDF capabilities, still authoring a candidate and publishing only through the Office OS core.
 
 ## 4. Execute in useful chunks
 
@@ -115,4 +115,4 @@ Mark waiting state before asking the user and completion after the scheduling de
 
 ## Completion criteria
 
-Finish only when every agreed output exists at its stable path, changed units pass the chosen QA, original sources remain unchanged, run state is closed, temporary artifacts are cleaned, and the user has received the one-time scheduling offer.
+Finish only when every agreed output exists at its stable path, changed units pass the chosen QA, original sources remain unchanged, run state is closed, managed candidates and other temporary artifacts are cleaned, and the user has received the one-time scheduling offer.

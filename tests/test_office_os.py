@@ -1,5 +1,7 @@
+# noqa: SIZE_OK - Task 13 keeps one consolidated behavioral suite for the preserved Office core.
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -10,10 +12,12 @@ import tempfile
 import unittest
 import zipfile
 from collections.abc import Sequence
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "skills" / "office-os" / "scripts" / "office_os.py"
+CANDIDATES = ROOT / "skills" / "office-os" / "scripts" / "office_candidates.py"
 
 
 def write_xlsx(path: Path, text: str) -> None:
@@ -143,7 +147,7 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(len(roots), 1)
         return roots[0]
 
-    def begin_publish_run(
+    def begin_publish_run(  # noqa: DICT_OK - heterogeneous CLI JSON fixture state.
         self,
         task: str,
         sources: Sequence[Path],
@@ -527,6 +531,157 @@ class CoreCase(unittest.TestCase):
         )
         self.assertEqual(error["status"], "error")
         self.assertEqual(target.read_bytes(), expected)
+
+    def test_managed_candidate_lifecycle_is_bounded_across_success_failure_and_restart(self) -> None:
+        source = self.workspace / "source.xlsx"
+        candidate_root = self.plugin_data / "officecli-candidates"
+        candidate = candidate_root / "run-1" / "candidate.xlsx"
+        write_xlsx(source, "source")
+        write_xlsx(candidate, "published-output")
+        source_before = source.read_bytes()
+
+        self.begin_publish_run("受管候選成功", (source,))
+        published, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "受管候選成功",
+        )
+        self.assertEqual(published["status"], "published")
+        self.assertTrue(published["candidate_removed"])
+        self.assertFalse(candidate.exists())
+        self.assertEqual(source.read_bytes(), source_before)
+        self.run_core("complete", "--summary", "published")
+
+        failed = candidate_root / "run-2" / "invalid.xlsx"
+        failed.parent.mkdir(parents=True)
+        failed.write_text("invalid", encoding="utf-8")
+        self.begin_publish_run("受管候選失敗", (source,))
+        error, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(failed),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "受管候選失敗",
+            expected=2,
+        )
+        self.assertEqual(error["status"], "error")
+        self.assertTrue(failed.exists(), "a failed candidate stays available for revision")
+        failed_state, _ = self.run_core("fail", "--reason", "owner stopped revision")
+        self.assertTrue(failed_state["candidate_removed"])
+        self.assertFalse(failed.exists())
+
+        candidate_root.mkdir(parents=True, exist_ok=True)
+        for number in range(40):
+            (candidate_root / f"interrupted-{number:02d}.xlsx").write_bytes(b"candidate")
+        self.begin_publish_run("受管候選回收", (source,))
+        remaining = [path for path in candidate_root.rglob("*") if path.is_file()]
+        self.assertLessEqual(len(remaining), 32)
+        cleanup, _ = self.run_core("cleanup", "--older-than-seconds", "0")
+        self.assertEqual(cleanup["managed_candidates"]["remaining_files"], 0)
+        self.assertEqual(
+            [path for path in candidate_root.rglob("*") if path.is_file()], []
+        )
+
+    def test_candidate_cleanup_refuses_a_linked_staging_root(self) -> None:
+        candidate_root = self.plugin_data / "officecli-candidates"
+        candidate_root.parent.mkdir(parents=True)
+        outside = self.base / "outside-candidates"
+        outside.mkdir()
+        sentinel = outside / "sentinel.xlsx"
+        sentinel.write_bytes(b"outside")
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(candidate_root), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            candidate_root.symlink_to(outside, target_is_directory=True)
+        try:
+            error, _ = self.run_core(
+                "begin",
+                "--task",
+                "拒絕連結候選根",
+                "--intent",
+                "update",
+                "--object",
+                "excel",
+                "--permission",
+                "fixed-output-write",
+                "--qa",
+                "fast",
+                "--units",
+                "1",
+                expected=2,
+            )
+            self.assertIn("linked", error["error"])
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+        finally:
+            if os.path.lexists(candidate_root):
+                if os.name == "nt":
+                    os.rmdir(candidate_root)
+                else:
+                    candidate_root.unlink()
+
+    def test_candidate_cleanup_skips_linked_entries_without_touching_outside_files(self) -> None:
+        candidate_root = self.plugin_data / "officecli-candidates"
+        candidate_root.mkdir(parents=True)
+        outside = self.base / "outside-entry"
+        outside.mkdir()
+        sentinel = outside / "sentinel.xlsx"
+        sentinel.write_bytes(b"outside")
+        linked = candidate_root / "linked"
+        if os.name == "nt":
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+        else:
+            linked.symlink_to(outside, target_is_directory=True)
+        try:
+            cleanup, _ = self.run_core("cleanup", "--older-than-seconds", "0")
+            self.assertEqual(sentinel.read_bytes(), b"outside")
+            self.assertIn(
+                os.fspath(linked), cleanup["managed_candidates"]["skipped_links"]
+            )
+            self.assertTrue(os.path.lexists(linked))
+        finally:
+            if os.path.lexists(linked):
+                if os.name == "nt":
+                    os.rmdir(linked)
+                else:
+                    linked.unlink()
+
+    def test_candidate_cleanup_enforces_the_byte_quota(self) -> None:
+        spec = importlib.util.spec_from_file_location("office_candidates_test", CANDIDATES)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader if spec else None)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+        root = self.plugin_data / "officecli-candidates"
+        root.mkdir(parents=True)
+        for number in range(3):
+            (root / f"candidate-{number}.xlsx").write_bytes(b"x" * 10)
+        with mock.patch.object(module, "MAX_CANDIDATE_FILES", 10):
+            with mock.patch.object(module, "MAX_CANDIDATE_BYTES", 20):
+                result = module.prune_managed_candidates(
+                    self.plugin_data, older_than_seconds=86_400
+                )
+        self.assertEqual(result["remaining_files"], 2)
+        self.assertEqual(result["remaining_bytes"], 20)
+        self.assertEqual(result["removed_count"], 1)
 
     def test_cross_file_noop_digest_covers_every_source(self) -> None:
         workbook = self.workspace / "source.xlsx"

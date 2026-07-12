@@ -45,7 +45,7 @@ python scripts/officecli_manager.py install --accept-download
 
 The manager keeps one verified version under plugin data and prunes only ordinary old-version siblings after successful verification. It does not place the executable on `PATH`, install another skill, register another MCP server, or mutate user OfficeCLI configuration.
 
-The adapter derives the fixed `PLUGIN_DATA/officecli-candidates` staging root itself. Copy a source into that root, operate only on the candidate, then validate and publish through the Office OS core to the stable sibling `Office OS Output` target. Callers cannot choose the candidate root or screenshot destination. Normal commands are limited to 60 seconds, screenshots to 120 seconds, and both process streams and returned PNG data are bounded.
+The adapter derives the fixed `PLUGIN_DATA/officecli-candidates` staging root itself. Copy a source into that root, operate only on the candidate, then validate and publish through the Office OS core to the stable sibling `Office OS Output` target. The core removes completed/closed candidates, reclaims candidates older than 24 hours, and caps staging at 32 files and 2 GiB without following links. Callers cannot choose the candidate root or screenshot destination. Normal commands are limited to 60 seconds, screenshots to 120 seconds, and both process streams and returned PNG data are bounded.
 
 Each allowlisted child command receives update, installation, and resident suppression in its child-command environment only. The adapter never starts OfficeCLI's upstream MCP mode or calls an unverified executable directly, and it rechecks the pinned SHA before every call. These controls do not change persistent user settings or promise behavior outside the adapter.
 

@@ -74,6 +74,7 @@ class ContractCase(unittest.TestCase):
             "意圖：<意圖>｜物件：<物件>｜權限：<權限>｜檢查：<檢查>",
             "ask exactly one short question at a time",
             "PLUGIN_DATA/officecli-candidates",
+            "at most 32 files and 2 GiB",
             "replace the same stable target",
             "Manual replacement keeps no history",
             "`.bak.1`, `.bak.2`, and `.bak.3`",
@@ -126,6 +127,9 @@ class ContractCase(unittest.TestCase):
             "image/png",
             "removes the temporary image in `finally`",
             "never launches OfficeCLI's upstream MCP mode",
+            "files older than 24 hours",
+            "at most 32 ordinary files",
+            "at most 2 GiB",
         )
         for marker in required:
             self.assertIn(marker, text)
@@ -146,6 +150,7 @@ class ContractCase(unittest.TestCase):
         for marker in (
             "Latest 256 live stable tasks",
             "PLUGIN_DATA/officecli-candidates",
+            "cap staging at 32 files and 2 GiB",
             "`Office OS Output`",
             "Manual publishing keeps no history",
             "`.bak.1`, `.bak.2`, and `.bak.3`",

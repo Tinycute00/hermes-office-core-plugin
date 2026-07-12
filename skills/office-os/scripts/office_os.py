@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# noqa: SIZE_OK - Task 13 preserves this user-owned single state/publish core; new lifecycle logic is delegated.
 """Local state, indexing, and publishing core for Office OS.
 
 This module deliberately does not author Office files. Codex's installed Office
@@ -28,6 +29,11 @@ from typing import Any, Iterable, Iterator, Sequence
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
+
+from office_candidates import CandidateCleanupResult, CandidateLifecycleError
+from office_candidates import MAX_CANDIDATE_AGE_SECONDS
+from office_candidates import prune_managed_candidates
+from office_candidates import remove_managed_candidate
 
 
 def configure_stdio() -> None:
@@ -69,7 +75,7 @@ class OfficeOSError(RuntimeError):
     """A user-actionable Office OS core error."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Fingerprint:
     path: str
     size: int
@@ -89,7 +95,7 @@ class Fingerprint:
         }
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FullTextRootUpdate:
     grants: tuple[str, ...]
     revocations: tuple[str, ...]
@@ -116,6 +122,27 @@ def plugin_data_root() -> Path:
     if configured:
         return canonical_path(configured)
     return canonical_path(Path(tempfile.gettempdir()) / "office-os-plugin-data")
+
+
+def cleanup_managed_candidates(
+    *, older_than_seconds: int = MAX_CANDIDATE_AGE_SECONDS
+) -> CandidateCleanupResult:
+    try:
+        return prune_managed_candidates(
+            plugin_data_root(), older_than_seconds=older_than_seconds
+        )
+    except CandidateLifecycleError as error:
+        raise OfficeOSError(str(error)) from error
+
+
+def cleanup_run_candidate(state: dict[str, Any]) -> bool:
+    value = state.get("candidate")
+    if not isinstance(value, str):
+        return False
+    try:
+        return remove_managed_candidate(plugin_data_root(), Path(value))
+    except CandidateLifecycleError as error:
+        raise OfficeOSError(str(error)) from error
 
 
 def get_workspace_dir(cwd: str | Path | None = None) -> Path:
@@ -155,11 +182,12 @@ def state_lock(directory: Path, timeout: float = 1.0) -> Iterator[None]:
             descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             try:
-                if time.time() - lock_path.stat().st_mtime > 120:
-                    lock_path.unlink(missing_ok=True)
-                    continue
+                lock_is_stale = time.time() - lock_path.stat().st_mtime > 120
             except OSError:
-                pass
+                lock_is_stale = False
+            if lock_is_stale:
+                lock_path.unlink(missing_ok=True)
+                continue
             if time.monotonic() >= deadline:
                 raise OfficeOSError("Office OS state is busy; retry the current chunk.")
             time.sleep(0.025)
@@ -284,7 +312,7 @@ def detect_sensitivity(path: Path) -> tuple[str, str]:
             if reader.is_encrypted:
                 return "metadata-only", "encrypted PDF"
         except ImportError:
-            pass
+            return "normal", ""
         except (OSError, ValueError, PyPdfError):
             return "metadata-only", "unreadable PDF"
     return "normal", ""
@@ -1243,6 +1271,7 @@ def read_run_state(directory: Path) -> dict[str, Any]:
 
 
 def command_begin(args: argparse.Namespace) -> int:
+    candidate_cleanup = cleanup_managed_candidates()
     directory = get_workspace_dir(args.cwd)
     if args.units < 0:
         raise OfficeOSError("Unit count cannot be negative.")
@@ -1298,6 +1327,11 @@ def command_begin(args: argparse.Namespace) -> int:
             "continuation_count": 0,
             "no_progress_stops": 0,
             "waiting_for_user": False,
+            "candidate_cleanup": {
+                "removed_count": candidate_cleanup["removed_count"],
+                "remaining_files": candidate_cleanup["remaining_files"],
+                "remaining_bytes": candidate_cleanup["remaining_bytes"],
+            },
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
@@ -1348,6 +1382,7 @@ def command_complete(args: argparse.Namespace) -> int:
             "status": "complete",
             "summary": args.summary,
             "completed_at": utc_now(),
+            "candidate_removed": cleanup_run_candidate(state) if state else False,
         }
         write_json(directory / "latest_summary.json", summary)
         run_state_path(directory).unlink(missing_ok=True)
@@ -1366,6 +1401,7 @@ def command_fail(args: argparse.Namespace) -> int:
         state["waiting_for_user"] = False
         state["error"] = args.reason[:500]
         state["updated_at"] = utc_now()
+        state["candidate_removed"] = cleanup_run_candidate(state)
         write_json(run_state_path(directory), state)
         release_single_flight(directory, state.get("run_id"))
     json_print(state)
@@ -1649,12 +1685,16 @@ def command_needs_run(args: argparse.Namespace) -> int:
 
 
 def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
-    candidate = canonical_path(args.candidate)
+    candidate_input = Path(os.path.abspath(os.fspath(args.candidate)))
+    candidate = canonical_path(candidate_input)
     sources = [canonical_path(item) for item in (args.source or [])]
     primary_source = sources[0] if sources else None
     sources_before = fingerprint_sources(sources)
     task_key = stable_task_key(args.task)
     active_run = require_publish_authority(directory, task_key, args.mode)
+    active_run["candidate"] = os.fspath(candidate_input)
+    active_run["updated_at"] = utc_now()
+    write_json(run_state_path(directory), active_run)
     if (
         active_run.get("task_key") == task_key
         and active_run.get("source_digest") is not None
@@ -1672,12 +1712,14 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
     ):
         if candidate.parent == output_directory and candidate.name.startswith(TEMP_PREFIX):
             candidate.unlink(missing_ok=True)
+        candidate_removed = cleanup_run_candidate(active_run)
         json_print(
             {
                 "status": "unchanged",
                 "task_key": task_key,
                 "target": os.fspath(target),
                 "backups_created": 0,
+                "candidate_removed": candidate_removed,
             }
         )
         return 0
@@ -1705,6 +1747,7 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
         update_publish_record(
             directory, task_key, target, sources_before, output_fingerprint
         )
+        candidate_removed = cleanup_run_candidate(active_run)
         json_print(
             {
                 "status": "published",
@@ -1718,6 +1761,7 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
                     if sources
                     else None
                 ),
+                "candidate_removed": candidate_removed,
             }
         )
     finally:
@@ -1741,6 +1785,8 @@ def command_cleanup(args: argparse.Namespace) -> int:
     removed: list[str] = []
     roots = [canonical_path(args.path)] if args.path else [canonical_path(args.cwd or os.getcwd())]
     cutoff = time.time() - args.older_than_seconds
+    managed = cleanup_managed_candidates(older_than_seconds=args.older_than_seconds)
+    removed.extend(str(path) for path in managed["removed"])
     for root in roots:
         output_directory = root / OUTPUT_DIRECTORY_NAME
         if output_directory.is_dir():
@@ -1765,7 +1811,16 @@ def command_cleanup(args: argparse.Namespace) -> int:
     if lock.exists() and time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
         lock.unlink(missing_ok=True)
         removed.append(os.fspath(lock))
-    json_print({"removed_count": len(removed), "removed": removed})
+    removed_count = len(removed) - len(managed["removed"]) + int(
+        managed["removed_count"]
+    )
+    json_print(
+        {
+            "removed_count": removed_count,
+            "removed": removed,
+            "managed_candidates": managed,
+        }
+    )
     return 0
 
 

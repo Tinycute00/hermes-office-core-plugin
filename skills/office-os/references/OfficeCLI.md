@@ -28,6 +28,8 @@ Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally.
 
 Never pass an original source path. The adapter rejects lexical, canonical, real-path, closest-existing-parent, symlink, junction, reparse-point, and prefix-boundary escapes. The only excluded threat is a malicious concurrent local link swap after validation.
 
+The staging root is production-bounded, not a history folder. Successful publish, completion, and explicit failure remove the managed candidate. A failed publish retains it only while revision is active. `begin` and `cleanup` reclaim files older than 24 hours and then keep at most 32 ordinary files totaling at most 2 GiB. Linked staging roots and linked entries are never followed or deleted.
+
 ## Allowed command grammar
 
 Use only `validate`, `get`, `query`, `view`, `set`, `add`, `remove`, `move`, and `swap`, with an optional final `--json` token:
