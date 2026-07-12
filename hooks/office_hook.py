@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# noqa: SIZE_OK - one bounded process owns the three registered lifecycle events.
 """Codex lifecycle hook for Office OS.
 
 The hook is intentionally small: detect current-turn Office intent, restore a
@@ -68,6 +69,10 @@ ACTION_PATTERN = re.compile(
     r"combine|convert|schedule|repeat|recurring|automate)\b|"
     r"找|搜尋|查找|查看|讀取|擷取|摘要|分析|檢查|審閱|比較|建立|製作|"
     r"撰寫|編輯|修改|更新|修正|格式|合併|整合|轉換|排程|定期|循環|自動",
+    re.IGNORECASE,
+)
+SCHEDULE_PATTERN = re.compile(
+    r"\b(?:schedule|repeat|recurring|automate)\b|排程|定期|循環|自動",
     re.IGNORECASE,
 )
 
@@ -210,16 +215,20 @@ def is_office_prompt(prompt: str) -> bool:
     return bool(ACTION_PATTERN.search(cleaned) and object_hints(cleaned))
 
 
-def prompt_reference(prompt: str) -> str:
-    hints = object_hints(strip_code(prompt))
+def prompt_reference(prompt: str) -> tuple[str, ...]:
+    cleaned = strip_code(prompt)
+    hints = object_hints(cleaned)
     if len(hints) != 1:
-        return "Office.md"
-    return {
+        return ("Office.md",)
+    object_reference = {
         "Excel": "Excel.md",
         "Word": "Word.md",
         "PowerPoint": "PowerPoint.md",
         "PDF": "PDF.md",
     }[hints[0]]
+    if SCHEDULE_PATTERN.search(cleaned):
+        return (object_reference, "Office.md")
+    return (object_reference,)
 
 
 def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bool:
@@ -282,13 +291,17 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         or Path(__file__).resolve().parents[1]
     )
     skill_path = plugin_root / "skills" / "office-os" / "SKILL.md"
-    reference = plugin_root / "skills" / "office-os" / "references" / prompt_reference(prompt)
+    references = [
+        plugin_root / "skills" / "office-os" / "references" / name
+        for name in prompt_reference(prompt)
+    ]
     context = (
         "Current-turn Office workflow detected. Invoke $office-os. "
         "Before any other visible text, output the intent envelope in this exact shape: "
         "意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>. "
         "Classify this turn only; prior edit or schedule permission does not carry over. "
-        f"Read {skill_path} and the relevant reference {reference}."
+        f"Read {skill_path} and the relevant references "
+        f"{', '.join(os.fspath(reference) for reference in references)}."
     )
     emit(context_output("UserPromptSubmit", context))
 

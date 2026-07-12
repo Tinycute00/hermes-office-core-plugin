@@ -51,7 +51,7 @@ class HookCase(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
-    def prompt_payload(self, prompt: str, turn: str = "turn-1") -> dict:
+    def prompt_payload(self, prompt: str, turn: str = "turn-1") -> dict:  # noqa: DICT_OK
         return {
             "hook_event_name": "UserPromptSubmit",
             "session_id": "session-1",
@@ -70,6 +70,19 @@ class HookCase(unittest.TestCase):
         self.assertIn("Excel.md", context)
         self.assertIn("意圖：<值>", context)
         self.assertIsNone(self.run_hook(payload))
+
+    def test_single_object_schedule_routes_office_and_object_references(self) -> None:
+        result = self.run_hook(
+            self.prompt_payload("每週更新 budget.xlsx 並保留排程", "turn-schedule")
+        )
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertEqual(context.count("Excel.md"), 1)
+        self.assertEqual(context.count("Office.md"), 1)
+        self.assertEqual(
+            {path.name for path in self.workspace_data().iterdir()},
+            {"hook_dedup.json"},
+        )
 
     def test_code_only_and_unrelated_prompts_do_not_trigger(self) -> None:
         fence = chr(96) * 3
