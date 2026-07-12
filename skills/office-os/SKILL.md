@@ -22,7 +22,7 @@ Choose one value per dimension:
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 
-Read [Agent.md](references/Agent.md) and [Workflow.md](references/Workflow.md) before substantive work. Then read only the matching object reference. Read [Office.md](references/Office.md) for lookup, indexing, confidential-data handling, cross-file work, or scheduling.
+Read [Agent.md](references/Agent.md) and [Workflow.md](references/Workflow.md) before substantive work. Then read only the matching object reference. Read [Office.md](references/Office.md) for lookup, indexing, confidential-data handling, cross-file work, or scheduling. Read [OfficeCLI.md](references/OfficeCLI.md) for writable Office work or rendered QA.
 
 ## 2. Ground and agree
 
@@ -45,9 +45,15 @@ Resolve the bundled scripts/office_os.py from this SKILL.md and invoke it by abs
 
 Repeat --source for cross-file work. Omit it only for a genuinely source-free creation.
 
-Keep sources unchanged. Publish writable results to a sibling Office OS Output folder. Reuse the same stable target for the same task.
+Keep sources unchanged. Use the stable task label as the task key, publish writable results to a sibling `Office OS Output` folder, and replace the same stable target when that task repeats. Never create timestamped output identities.
 
 Use Codex's installed spreadsheet, document, presentation, and PDF capabilities for authoring and visual inspection. Use this skill's Python core for fingerprints, indexing, run state, overlap control, candidate validation, backup rotation, cleanup, and final publish.
+
+For `.xlsx`, `.docx`, or `.pptx` authoring and rendered QA, quietly check the managed OfficeCLI runtime once. Resolve the plugin root from this SKILL.md and run:
+
+    python "<plugin-root>/scripts/officecli_manager.py" status
+
+If it is installed, prefer the managed local `officecli` adapter for deterministic structure edits, JSON inspection, validation, and screenshots. Before any adapter call, create a new candidate or copy the source into the fixed `PLUGIN_DATA/officecli-candidates` staging root; pass only that candidate, never a source. If the runtime is missing, ask one short question before downloading the executable. After approval, install the pinned runtime once with `install --accept-download`; the operation is checksum-verified and idempotent. If approval is declined or the adapter is unavailable, continue with Codex's installed spreadsheet, document, presentation, and PDF capabilities, still authoring a candidate and publishing only through the Office OS core.
 
 ## 4. Execute in useful chunks
 
@@ -58,6 +64,10 @@ Select chunks by object:
 - PowerPoint: slide → shape tree. Read [PowerPoint.md](references/PowerPoint.md).
 - PDF: relevant page/section, read-only. Read [PDF.md](references/PDF.md).
 - Cross-file: index and retrieve only the source slices needed for the next output unit. Read [Office.md](references/Office.md).
+
+Persistent indexing starts metadata-only. Ask the owner before granting a workspace
+root full-text access; never infer durable consent from permission to read a file for
+the current task.
 
 After each completed chunk, record real progress with a changed marker and remaining-unit count. A chunk is complete only when its content and local structure pass the selected QA.
 
@@ -79,7 +89,7 @@ Publish with:
 
 Repeat --source for a cross-file task so the no-op fingerprint covers every input.
 
-For scheduled work, use --mode scheduled. Manual replacement keeps no history. Scheduled replacement keeps at most .bak.1, .bak.2, and .bak.3. If the source hash is unchanged, treat the run as a no-op: do not rewrite the output or create a backup. A failed candidate must leave the previous published output usable.
+For scheduled work, use --mode scheduled. Manual replacement keeps no history. Scheduled replacement keeps only `.bak.1`, `.bak.2`, and `.bak.3`. If the source hash is unchanged, treat the run as a no-op: do not rewrite the output or create a backup. Keep only `latest_summary.json`, never a per-run summary history. A failed candidate must leave the previous published output usable.
 
 Same-volume replacement reduces partial-write risk; describe it as replacement publishing, not as an absolute crash-safe transaction.
 
@@ -87,7 +97,7 @@ Same-volume replacement reduces partial-write risk; describe it as replacement p
 
 Present the result, output location, changed units, QA performed, and any unresolved limitation. If the user requests revisions, reclassify that turn, update the same stable output, and validate only the affected dependency surface.
 
-When the result is accepted or no revision is requested, ask one short question: whether to make this a recurring task.
+Only after the result is complete and accepted, optionally ask one short question: whether to make this a recurring task. Never create a schedule automatically.
 
 If yes:
 
