@@ -13,8 +13,10 @@ from officecli_runtime import runtime_status
 from officecli_runtime import side_effect_free_environment
 from officecli_runtime import uninstall_runtime
 
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
 
-def json_print(value: object) -> None:
+
+def json_print(value: JsonValue) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# noqa: SIZE_OK - plan-mandated consolidated integration suite for one OfficeCLI surface.
+
 import hashlib
 import importlib.util
 import json
@@ -23,13 +25,17 @@ RUNNER = ROOT / "scripts" / "officecli-mcp" / "runner.cjs"
 NODE = shutil.which("node")
 
 
+class OfficeCLITestSetupError(RuntimeError):
+    pass
+
+
 def load_manager():
     scripts = os.fspath(MANAGER.parent)
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
     spec = importlib.util.spec_from_file_location("officecli_manager", MANAGER)
     if spec is None or spec.loader is None:
-        raise RuntimeError("Cannot load OfficeCLI manager module.")
+        raise OfficeCLITestSetupError("Cannot load OfficeCLI manager module.")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -45,9 +51,16 @@ def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
         "if(args.fail==='internal')throw new Error('boom');"
         "return {content:[{type:'text',text:'ok'}]};}});"
     )
+    return subprocess.run(
+        [NODE or "node", "-e", self_test, os.fspath(JSONRPC)],
+        cwd=ROOT,
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
 
 
-def run_policy(arguments: dict, data_root: Path) -> dict:
+def run_policy(arguments: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     script = (
         "const { TOOL, parseToolArguments } = require(process.argv[1]);"
         "let input='';process.stdin.setEncoding('utf8');"
@@ -74,7 +87,7 @@ def run_policy(arguments: dict, data_root: Path) -> dict:
     return json.loads(completed.stdout)
 
 
-def run_runner(configuration: dict, data_root: Path) -> dict:
+def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     script = (
         "const runner=require(process.argv[1]);let input='';"
         "process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);"
@@ -117,16 +130,112 @@ def process_exists(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def run_adapter(
+    payload: bytes,
+    data_root: Path,
+    foreign_cwd: Path,
+    capture: Path,
+    tamper_after_start: bool = False,
+) -> subprocess.CompletedProcess[bytes]:
+    script = (
+        "const fs=require('node:fs');const adapter=require(process.argv[1]);"
+        "let checks=0,calls=0;adapter.start({"
+        f"verifyRuntime:()=>{{checks+=1;if({str(tamper_after_start).lower()}&&checks>1)throw new adapter.RuntimeIntegrityError('runtime checksum mismatch');return process.execPath;}},"
+        "execute:async(_binary,parsed)=>{calls+=1;fs.writeFileSync(process.argv[2],JSON.stringify({argv:parsed.argv,calls,checks}));return {content:[{type:'text',text:'ok'}]};}"
+        "});"
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_DATA"] = os.fspath(data_root)
     return subprocess.run(
-        [NODE or "node", "-e", self_test, os.fspath(JSONRPC)],
-        cwd=ROOT,
+        [NODE or "node", "-e", script, os.fspath(LAUNCHER), os.fspath(capture)],
+        cwd=foreign_cwd,
+        env=environment,
         input=payload,
         capture_output=True,
         check=False,
+        timeout=10,
     )
-
-
 class OfficeCLICase(unittest.TestCase):
+    def test_adapter_canonical_config_foreign_cwd_and_no_upstream_mcp(self) -> None:
+        expected = {
+            "mcpServers": {
+                "officecli": {
+                    "command": "node",
+                    "args": ["./scripts/officecli-mcp.cjs"],
+                    "cwd": ".",
+                }
+            }
+        }
+        self.assertEqual(json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8")), expected)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidates = data_root / "officecli-candidates"
+            candidates.mkdir(parents=True)
+            candidate = candidates / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            foreign = base / "foreign-workspace"
+            foreign.mkdir()
+            capture = base / "capture.json"
+            messages = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate), "--json"]}},
+                },
+            ]
+            payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
+            completed = run_adapter(payload, data_root, foreign, capture)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            responses = [json.loads(line) for line in completed.stdout.splitlines()]
+            self.assertEqual([response["id"] for response in responses], [1, 2, 3])
+            self.assertEqual(
+                responses[0]["result"]["serverInfo"],
+                {"name": "office-os-officecli", "version": "1.0.135"},
+            )
+            tools = responses[1]["result"]["tools"]
+            self.assertEqual(len(tools), 1)
+            self.assertEqual(tools[0]["name"], "officecli")
+            self.assertEqual(tools[0]["inputSchema"]["properties"]["command"]["type"], "array")
+            captured = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(captured["argv"][0], "validate")
+            self.assertNotIn("mcp", captured["argv"])
+            for line in completed.stdout.splitlines():
+                json.loads(line)
+
+    def test_adapter_revalidates_binary_before_every_call(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidates = data_root / "officecli-candidates"
+            candidates.mkdir(parents=True)
+            candidate = candidates / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            capture = base / "capture.json"
+            messages = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate)]}},
+                },
+            ]
+            payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
+            completed = run_adapter(payload, data_root, base, capture, tamper_after_start=True)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            responses = [json.loads(line) for line in completed.stdout.splitlines()]
+            self.assertEqual(responses[1]["id"], 2)
+            self.assertTrue(responses[1]["result"]["isError"])
+            self.assertIn("checksum mismatch", responses[1]["result"]["content"][0]["text"])
+            self.assertFalse(capture.exists())
+
     def test_runner_kills_tree_on_timeout_and_overflow(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
@@ -213,7 +322,8 @@ class OfficeCLICase(unittest.TestCase):
         self.assertFalse(tool["inputSchema"]["additionalProperties"])
         command = tool["inputSchema"]["properties"]["command"]
         self.assertEqual(command["type"], "array")
-        self.assertEqual(command["items"], {"type": "string"})
+        expected_items = {"type": "string"}
+        self.assertEqual(command["items"], expected_items)
         self.assertEqual((command["minItems"], command["maxItems"]), (1, 128))
 
     def test_allowed_and_denied_grammar_families(self) -> None:
@@ -538,14 +648,14 @@ class OfficeCLICase(unittest.TestCase):
                 status["actual_sha256"], hashlib.sha256(b"not-officecli").hexdigest()
             )
 
-    @unittest.skipUnless(shutil.which("node"), "Node.js is not available")
     def test_mcp_launcher_fails_closed_when_runtime_is_missing(self) -> None:
+        self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary) / "plugin-data"
             environment = os.environ.copy()
             environment["PLUGIN_DATA"] = os.fspath(data_root)
             completed = subprocess.run(
-                ["node", os.fspath(LAUNCHER)],
+                [NODE or "node", os.fspath(LAUNCHER)],
                 cwd=ROOT,
                 env=environment,
                 input="",

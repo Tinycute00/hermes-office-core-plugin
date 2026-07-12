@@ -3,6 +3,13 @@
 const MAX_LINE_BYTES = 1024 * 1024;
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 
+class InvalidParamsError extends Error {
+  constructor(message) {
+    super(message);
+    this.rpcCode = -32602;
+  }
+}
+
 function errorResponse(id, code, message) {
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
@@ -61,6 +68,9 @@ async function dispatch(message, state, adapter) {
   try {
     return successResponse(id, await adapter.callTool(params.arguments));
   } catch (error) {
+    if (error instanceof InvalidParamsError || error?.rpcCode === -32602) {
+      return errorResponse(id, -32602, error.message || "Invalid params");
+    }
     const messageText = error instanceof Error ? error.message : "Internal error";
     process.stderr.write(`OfficeCLI adapter error: ${messageText}\n`);
     return errorResponse(id, -32603, "Internal error");
@@ -127,6 +137,7 @@ function runProtocol(adapter) {
 }
 
 module.exports = {
+  InvalidParamsError,
   MAX_LINE_BYTES,
   runProtocol,
 };

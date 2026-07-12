@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "officecli": {
+      "command": "node",
+      "args": ["./scripts/officecli-mcp.cjs"],
+      "cwd": "."
+    }
+  }
+}

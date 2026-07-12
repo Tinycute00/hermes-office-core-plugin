@@ -8,7 +8,12 @@ const TOOL = {
   inputSchema: {
     type: "object",
     properties: {
-      command: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 128 },
+      command: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 1,
+        maxItems: 128,
+      },
     },
     required: ["command"],
     additionalProperties: false,
@@ -92,7 +97,14 @@ function property(value, bare = false) {
 }
 
 function validateCommon(command) {
-  if (!Array.isArray(command) || command.length < 1 || command.length > 128 || !command.every((item) => typeof item === "string")) {
+  if (
+    !Array.isArray(command) ||
+    command.length < 1 ||
+    command.length > 128 ||
+    !command.every(
+      (item) => typeof item === "string",
+    )
+  ) {
     throw new PolicyError("command must be an array of 1-128 strings.");
   }
   command.forEach((token) => text(token));
