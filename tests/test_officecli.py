@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MANAGER = ROOT / "scripts" / "officecli_manager.py"
 LOCK = ROOT / "vendor" / "officecli.lock.json"
 LAUNCHER = ROOT / "scripts" / "officecli-mcp.cjs"
+JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
+NODE = shutil.which("node")
 
 
 def load_manager():
@@ -31,7 +33,73 @@ def load_manager():
     return module
 
 
+def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
+    self_test = (
+        "const { runProtocol } = require(process.argv[1]);"
+        "runProtocol({"
+        "tool:{name:'officecli',description:'test',inputSchema:{type:'object'}},"
+        "callTool:async(args)=>{"
+        "if(args.fail==='policy')return {content:[{type:'text',text:'denied'}],isError:true};"
+        "if(args.fail==='internal')throw new Error('boom');"
+        "return {content:[{type:'text',text:'ok'}]};}});"
+    )
+    return subprocess.run(
+        [NODE or "node", "-e", self_test, os.fspath(JSONRPC)],
+        cwd=ROOT,
+        input=payload,
+        capture_output=True,
+        check=False,
+    )
+
+
 class OfficeCLICase(unittest.TestCase):
+    def test_jsonrpc_lifecycle_errors_notifications_and_recovery(self) -> None:
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+            {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 4, "method": "unknown"},
+            {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {}},
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "officecli", "arguments": {"fail": "policy"}}},
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "officecli", "arguments": {"fail": "internal"}}},
+            {"jsonrpc": "2.0", "method": "unknown-notification"},
+            {"jsonrpc": "2.0", "id": 8, "method": "ping"},
+        ]
+        payload = b"not-json\n" + b"\n".join(
+            json.dumps(message).encode() for message in messages
+        ) + b"\n"
+        completed = run_jsonrpc(payload)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual(
+            [response.get("id") for response in responses],
+            [None, 1, 2, 3, 4, 5, 6, 7, 8],
+        )
+        self.assertEqual(responses[0]["error"]["code"], -32700)
+        self.assertEqual(responses[1]["error"]["code"], -32600)
+        self.assertEqual(responses[4]["error"]["code"], -32601)
+        self.assertEqual(responses[5]["error"]["code"], -32602)
+        self.assertTrue(responses[6]["result"]["isError"])
+        self.assertEqual(responses[7]["error"]["code"], -32603)
+        self.assertEqual(responses[8]["result"], {})
+        self.assertEqual(completed.stderr, b"OfficeCLI adapter error: boom\n")
+
+    def test_jsonrpc_rejects_oversized_and_invalid_messages(self) -> None:
+        initialize = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        ).encode()
+        ping = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}).encode()
+        payload = initialize + b"\n" + (b"x" * (1024 * 1024 + 1)) + b"\n[]\n" + ping + b"\n"
+        completed = run_jsonrpc(payload)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual([response.get("id") for response in responses], [1, None, None, 2])
+        self.assertEqual(responses[1]["error"]["code"], -32700)
+        self.assertEqual(responses[2]["error"]["code"], -32600)
+        self.assertEqual(responses[3]["result"], {})
+        self.assertEqual(completed.stderr, b"")
+
     def test_lock_pins_correct_release(self) -> None:
         lock = json.loads(LOCK.read_text(encoding="utf-8"))
         self.assertEqual(lock["project"], "iOfficeAI/OfficeCLI")
