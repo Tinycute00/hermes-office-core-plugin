@@ -8,7 +8,7 @@ Office OS begins an Office turn with a compact intent classification. When a loc
 意圖：更新｜物件：Excel｜權限：固定輸出覆寫｜檢查：快速
 ```
 
-When the user has not supplied a local source, Office OS asks for the source before it inspects or alters Office data.
+When the user has not supplied a local source, Office OS asks for the source before it inspects or alters Office data. To make that final question deterministic, the hook keeps only a private hash-keyed intake marker: it never stores the raw prompt, caps live markers at 128, expires them after one hour on the next intake or Stop, and consumes the matching marker at Stop.
 
 ## File support
 

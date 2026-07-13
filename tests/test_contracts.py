@@ -163,7 +163,7 @@ class ContractCase(unittest.TestCase):
                 text.lower(),
             )
             self.assertIn(
-                "classify the Office workflow, state the read-only boundary, and name `$office-os` with why it applies",
+                "classify the Office workflow, state the read-only boundary, name office-os with or without the `$` invocation sigil, and explain why it applies",
                 text,
             )
             self.assertIn("copy", text.lower())
@@ -174,6 +174,11 @@ class ContractCase(unittest.TestCase):
                 "SKILL.md is ASCII-only and should be loaded exactly once",
                 text,
             )
+            self.assertIn("private intake marker", text)
+            self.assertIn("stores no raw prompt", text)
+            self.assertIn("caps live markers at 128", text)
+            self.assertIn("expires them after one hour", text)
+            self.assertIn("consumes the matching marker at Stop", text)
             self.assertNotIn("Prefer the canonical envelope", text)
             self.assertNotIn("must equal the supplied skill-use announcement verbatim", text.lower())
 
@@ -182,6 +187,9 @@ class ContractCase(unittest.TestCase):
         self.assertIn("compact intent classification", text)
         self.assertIn("not supplied a local source", text)
         self.assertIn("before it inspects or alters Office data", text)
+        self.assertIn("never stores the raw prompt", text)
+        self.assertIn("caps live markers at 128", text)
+        self.assertIn("expires them after one hour", text)
 
     def test_workflow_has_no_unbounded_or_automatic_policy(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
@@ -264,6 +272,10 @@ class ContractCase(unittest.TestCase):
             "never an active/running state",
             "do not traverse reparse points",
             "symlink, junction/reparse point, or hard link",
+            "PLUGIN_DATA/pending_intakes.json",
+            "Retain at most 128 live intake markers",
+            "expire them after one hour",
+            "stores no raw prompt",
         ):
             self.assertIn(marker, text)
         for stale in (

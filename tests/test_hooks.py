@@ -8,11 +8,18 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import TypedDict
 import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "office_hook.py"
+
+
+class PendingIntakeEntry(TypedDict):
+    key: str
+    expected: str
+    created_at: int
 
 
 class HookCase(unittest.TestCase):
@@ -86,6 +93,12 @@ class HookCase(unittest.TestCase):
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
+    def pending_intake_entries(self) -> list[PendingIntakeEntry]:
+        data = json.loads(
+            (self.plugin_data / "pending_intakes.json").read_text(encoding="utf-8")
+        )
+        return data["entries"]
+
     def prompt_payload(self, prompt: str, turn: str = "turn-1") -> dict:  # noqa: DICT_OK
         return {
             "hook_event_name": "UserPromptSubmit",
@@ -152,7 +165,7 @@ class HookCase(unittest.TestCase):
             context,
         )
         self.assertIn(
-            "classify the Office workflow, state the read-only boundary, and name $office-os with why it applies",
+            "classify the Office workflow, state the read-only boundary, name office-os with or without the $ invocation sigil, and explain why it applies",
             context,
         )
         self.assertIn(
@@ -184,32 +197,49 @@ class HookCase(unittest.TestCase):
         self.assertNotIn(os.fspath(skill_path), context)
         self.assertNotIn("Office.md", context)
 
-    def assert_source_free_without_state(self, prompt: str) -> None:
+    def assert_source_free_with_bounded_intake(self, prompt: str) -> None:
         result = self.run_hook(self.prompt_payload(prompt))
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
-        self.assertFalse(self.plugin_data.exists())
+        self.assertEqual(
+            {path.name for path in self.plugin_data.iterdir()},
+            {"pending_intakes.json", "run-state.lock"},
+        )
+        entries = self.pending_intake_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(
+            set(entries[0]), {"created_at", "expected", "key"}
+        )
+        self.assertRegex(str(entries[0]["key"]), r"\A[0-9a-f]{64}\Z")
+        self.assertNotIn(prompt, json.dumps(entries, ensure_ascii=False))
+        self.assertFalse((self.plugin_data / "workspaces").exists())
 
-    def test_nonexistent_bare_filename_remains_source_free_without_state(self) -> None:
+    def test_nonexistent_bare_filename_remains_source_free_with_bounded_intake(self) -> None:
         # Given: a fresh cwd and plugin data root with no matching source file.
         # When: a prompt names a missing Office filename.
+        prompt = "Please update missing-report.xlsx every week"
         result = self.run_hook(
-            self.prompt_payload("Please update missing-report.xlsx every week")
+            self.prompt_payload(prompt)
         )
 
-        # Then: the hook stays source-free and writes no workspace or plugin state.
+        # Then: the hook writes only one bounded control marker, never workspace state.
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
-        self.assertFalse(self.plugin_data.exists())
+        self.assertEqual(len(self.pending_intake_entries()), 1)
+        self.assertNotIn(
+            prompt,
+            (self.plugin_data / "pending_intakes.json").read_text(encoding="utf-8"),
+        )
+        self.assertFalse((self.plugin_data / "workspaces").exists())
         self.assertEqual(list(self.workspace.iterdir()), [])
 
-    def test_extension_only_prompt_remains_source_free_without_state(self) -> None:
-        self.assert_source_free_without_state("Create a new .xlsx file")
+    def test_extension_only_prompt_remains_source_free_with_bounded_intake(self) -> None:
+        self.assert_source_free_with_bounded_intake("Create a new .xlsx file")
 
-    def test_url_prompt_remains_source_free_without_state(self) -> None:
-        self.assert_source_free_without_state("Review https://example.com/report.xlsx")
+    def test_url_prompt_remains_source_free_with_bounded_intake(self) -> None:
+        self.assert_source_free_with_bounded_intake("Review https://example.com/report.xlsx")
 
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
         self.create_sources("budget.xlsx")
@@ -346,18 +376,20 @@ class HookCase(unittest.TestCase):
         final = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(final["continuation_count"], 2)
 
-    def test_source_free_stop_retries_noncanonical_final_once_without_state(self) -> None:
-        malformed = (
-            "意圖：每週更新 Excel 報表；目前不修改檔案。\n"
-            "Excel 來源檔或資料夾路徑是什麼？"
+    def test_source_free_stop_retries_missing_final_from_pending_intake_once(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+            )
         )
+        self.assertTrue((self.plugin_data / "pending_intakes.json").is_file())
         payload = {
             "hook_event_name": "Stop",
-            "session_id": "session-source-free",
+            "session_id": "session-1",
             "turn_id": "turn-source-free",
             "cwd": os.fspath(self.workspace),
             "stop_hook_active": False,
-            "last_assistant_message": malformed,
         }
 
         correction = self.run_hook(payload)
@@ -368,16 +400,23 @@ class HookCase(unittest.TestCase):
             "Excel 來源檔或資料夾路徑是什麼？",
             correction["reason"],
         )
-        self.assertFalse(self.plugin_data.exists())
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
 
         payload["stop_hook_active"] = True
         self.assertEqual(self.run_hook(payload), {})
-        self.assertFalse(self.plugin_data.exists())
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
 
-    def test_source_free_stop_accepts_canonical_final_without_state(self) -> None:
+    def test_source_free_stop_accepts_exact_pending_final_and_consumes_state(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+            )
+        )
+        self.assertTrue((self.plugin_data / "pending_intakes.json").is_file())
         payload = {
             "hook_event_name": "Stop",
-            "session_id": "session-source-free",
+            "session_id": "session-1",
             "turn_id": "turn-source-free",
             "cwd": os.fspath(self.workspace),
             "stop_hook_active": False,
@@ -388,7 +427,48 @@ class HookCase(unittest.TestCase):
         }
 
         self.assertEqual(self.run_hook(payload), {})
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+
+    def test_source_free_stop_without_pending_intake_does_not_guess(self) -> None:
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-source-free",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": (
+                "意圖：每週更新 Excel 報表；目前不修改檔案。\n"
+                "Excel 來源檔或資料夾路徑是什麼？"
+            ),
+        }
+
+        self.assertEqual(self.run_hook(payload), {})
         self.assertFalse(self.plugin_data.exists())
+
+    def test_source_free_pending_intakes_are_bounded_and_stale_entries_expire(self) -> None:
+        for number in range(140):
+            self.run_hook(
+                self.prompt_payload(
+                    f"每週更新 Excel 報表 {number}；先不要改檔案。",
+                    f"turn-source-free-{number}",
+                )
+            )
+        entries = self.pending_intake_entries()
+        self.assertEqual(len(entries), 128)
+
+        stale_key = entries[-1]["key"]
+        entries[-1]["created_at"] = 0
+        (self.plugin_data / "pending_intakes.json").write_text(
+            json.dumps({"entries": entries}, ensure_ascii=False), encoding="utf-8"
+        )
+        self.run_hook(
+            self.prompt_payload(
+                "每週更新 Excel 最新報表；先不要改檔案。", "turn-source-free-latest"
+            )
+        )
+        refreshed = self.pending_intake_entries()
+        self.assertEqual(len(refreshed), 128)
+        self.assertNotIn(stale_key, {entry["key"] for entry in refreshed})
 
     def test_prompt_dedup_is_bounded(self) -> None:
         for number in range(140):
@@ -456,6 +536,40 @@ class HookCase(unittest.TestCase):
 
         self.assertIsNone(
             self.run_hook(self.prompt_payload("review report.xlsx", "turn-hardlink-dedup"), 1)
+        )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_source_free_hook_rejects_hardlinked_pending_intake_before_write(self) -> None:
+        self.plugin_data.mkdir()
+        sentinel = self.base / "outside-pending-intakes.json"
+        sentinel.write_text('{"entries":[]}', encoding="utf-8")
+        os.link(sentinel, self.plugin_data / "pending_intakes.json")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+
+        self.assertIsNone(
+            self.run_hook(
+                self.prompt_payload(
+                    "每週更新 Excel 報表；先不要改檔案。", "turn-hardlink-pending"
+                ),
+                1,
+            )
+        )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_source_free_hook_rejects_hardlinked_root_lock_before_write(self) -> None:
+        self.plugin_data.mkdir()
+        sentinel = self.base / "outside-root-lock.json"
+        sentinel.write_text("outside lock", encoding="utf-8")
+        os.link(sentinel, self.plugin_data / "run-state.lock")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+
+        self.assertIsNone(
+            self.run_hook(
+                self.prompt_payload(
+                    "每週更新 Excel 報表；先不要改檔案。", "turn-hardlink-root-lock"
+                ),
+                1,
+            )
         )
         self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
 

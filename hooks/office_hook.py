@@ -117,18 +117,16 @@ QUOTED_LOCAL_PATH_PATTERN = re.compile(
 ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
 MAX_DEDUP_KEYS = 128
 MAX_CONTINUATIONS = 2
+MAX_PENDING_INTAKES = 128
+PENDING_INTAKE_TTL_SECONDS = 3600
+PENDING_INTAKES_NAME = "pending_intakes.json"
+STOP_CORRECTION_PREFIX = "The source-free Office intake final reply was not canonical."
 CANONICAL_SOURCE_FREE_REPLY_PATTERN = re.compile(
     r"\A意圖：(查找|分析|檢查|建立|更新|整合|排程)｜"
     r"物件：(Excel|Word|PowerPoint|PDF|跨檔案)｜權限：唯讀｜"
     r"檢查：(快速|加強|完整)\n"
     r"(Excel|Word|PowerPoint|PDF|跨檔案) 來源檔或資料夾路徑是什麼？\Z"
 )
-SOURCE_REQUEST_PATTERN = re.compile(
-    r"(?:來源|檔案|資料夾|路徑|位置|哪(?:一個|個|裡)|什麼).*?[?？]\s*\Z",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
 class HookStateError(RuntimeError):
     pass
 
@@ -420,25 +418,29 @@ def source_free_check(prompt: str) -> str:
     return "快速"
 
 
-def source_free_intake_context(prompt: str) -> str:
+def expected_source_free_reply(prompt: str) -> str:
     object_name = source_free_object(prompt)
-    envelope = (
+    return (
         f"意圖：{source_free_intent(prompt)}｜物件：{object_name}｜權限：唯讀｜"
-        f"檢查：{source_free_check(prompt)}"
+        f"檢查：{source_free_check(prompt)}\n"
+        f"{object_name} 來源檔或資料夾路徑是什麼？"
     )
-    question = f"{object_name} 來源檔或資料夾路徑是什麼？"
+
+
+def source_free_intake_context(prompt: str) -> str:
+    expected = expected_source_free_reply(prompt)
     return (
         "<office-os-source-free-intake>\n"
         "<required-first-user-visible-contract>\n"
         "The first user-visible message MUST be one compact classification-and-skill-rationale sentence, "
         "before any tool call or skill load. It must classify the Office workflow, state the read-only "
-        "boundary, and name $office-os with why it applies.\n"
+        "boundary, name office-os with or without the $ invocation sigil, and explain why it applies.\n"
         "</required-first-user-visible-contract>\n"
         "Emit no other preamble, plan, progress, or tool-activity message.\n"
         "FINAL USER-VISIBLE REPLY MUST BE EXACTLY TWO NON-EMPTY LINES. "
         "THE FOLLOWING BLOCK IS AUTHORITATIVE:\n"
         "<required-final-reply>\n"
-        f"{envelope}\n{question}\n"
+        f"{expected}\n"
         "</required-final-reply>\n"
         "Copy the two lines inside <required-final-reply> verbatim as the entire final reply; "
         "do not reconstruct or paraphrase them from skill text.\n"
@@ -465,25 +467,92 @@ def canonical_source_free_reply(message: str) -> bool:
     return bool(match and match.group(2) == match.group(4))
 
 
-def source_free_stop_correction(payload: dict[str, Any]) -> dict[str, str] | None:
+def pending_intake_key(payload: dict[str, Any]) -> str:
+    session_id = str(payload.get("session_id") or "")
+    turn_id = str(payload.get("turn_id") or "")
+    if not session_id or not turn_id:
+        raise HookStateError("Office OS source-free intake requires session_id and turn_id.")
+    return hashlib.sha256(f"{session_id}\0{turn_id}".encode("utf-8")).hexdigest()
+
+
+def live_pending_intakes(value: Any, now: int) -> list[dict[str, Any]]:
+    entries = value.get("entries", []) if isinstance(value, dict) else []
+    live: list[dict[str, Any]] = []
+    cutoff = now - PENDING_INTAKE_TTL_SECONDS
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("key")
+        expected = entry.get("expected")
+        created_at = entry.get("created_at")
+        if (
+            isinstance(key, str)
+            and re.fullmatch(r"[0-9a-f]{64}", key)
+            and isinstance(expected, str)
+            and canonical_source_free_reply(expected)
+            and isinstance(created_at, int)
+            and not isinstance(created_at, bool)
+            and cutoff <= created_at <= now
+        ):
+            live.append(
+                {"key": key, "expected": normalized_message(expected), "created_at": created_at}
+            )
+    return live[-MAX_PENDING_INTAKES:]
+
+
+def remember_pending_intake(payload: dict[str, Any], expected: str) -> None:
+    data_root = ensure_ordinary_directory(
+        plugin_data_root(), "plugin data root", create_parents=True
+    )
+    cleanup_stale_temps(data_root)
+    key = pending_intake_key(payload)
+    now = int(time.time())
+    path = data_root / PENDING_INTAKES_NAME
+    with state_lock(data_root) as acquired:
+        if not acquired:
+            raise HookStateError("Office OS could not lock pending intake state.")
+        entries = live_pending_intakes(read_json(path, {"entries": []}), now)
+        entries = [entry for entry in entries if entry["key"] != key]
+        entries.append({"key": key, "expected": expected, "created_at": now})
+        write_json(path, {"entries": entries[-MAX_PENDING_INTAKES:]})
+
+
+def consume_pending_intake(payload: dict[str, Any]) -> str | None:
+    data_root = plugin_data_root()
+    validate_ordinary_ancestors(data_root, "plugin data root")
+    path = data_root / PENDING_INTAKES_NAME
+    if not os.path.lexists(data_root) or not os.path.lexists(path):
+        return None
+    key = pending_intake_key(payload)
+    now = int(time.time())
+    with state_lock(data_root) as acquired:
+        if not acquired:
+            raise HookStateError("Office OS could not lock pending intake state.")
+        entries = live_pending_intakes(read_json(path, {"entries": []}), now)
+        expected = next(
+            (entry["expected"] for entry in entries if entry["key"] == key), None
+        )
+        remaining = [entry for entry in entries if entry["key"] != key]
+        if remaining:
+            write_json(path, {"entries": remaining})
+        else:
+            unlink_state_leaf(path, "Office OS pending intake", missing_ok=True)
+        return expected
+
+
+def source_free_stop_correction(
+    payload: dict[str, Any], expected: str
+) -> dict[str, str] | None:
     message = str(payload.get("last_assistant_message") or "")
     normalized = normalized_message(message)
-    if not normalized or canonical_source_free_reply(normalized):
+    if normalized == expected:
         return None
     if bool(payload.get("stop_hook_active")):
         return None
-    if not SOURCE_REQUEST_PATTERN.search(normalized) or not object_hints(normalized):
-        return None
-    object_name = source_free_object(normalized)
-    expected = (
-        f"意圖：{source_free_intent(normalized)}｜物件：{object_name}｜權限：唯讀｜"
-        f"檢查：{source_free_check(normalized)}\n"
-        f"{object_name} 來源檔或資料夾路徑是什麼？"
-    )
     return {
         "decision": "block",
         "reason": (
-            "The source-free Office intake final reply was not canonical. "
+            f"{STOP_CORRECTION_PREFIX} "
             "Return exactly these two lines and nothing else:\n"
             f"{expected}"
         ),
@@ -563,10 +632,13 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
 
 def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
+    if prompt.lstrip().startswith(STOP_CORRECTION_PREFIX):
+        return
     if not prompt or not is_office_prompt(prompt):
         return
     cwd = str(payload.get("cwd") or os.getcwd())
     if not has_named_local_source(prompt, cwd):
+        remember_pending_intake(payload, expected_source_free_reply(prompt))
         emit(
             context_output(
                 "UserPromptSubmit",
@@ -611,8 +683,12 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
 
 
 def handle_stop(payload: dict[str, Any], directory: Path) -> None:
+    pending = consume_pending_intake(payload)
+    if pending is not None:
+        emit(source_free_stop_correction(payload, pending) or {})
+        return
     if not os.path.lexists(directory):
-        emit(source_free_stop_correction(payload) or {})
+        emit({})
         return
     path = directory / "run_state.json"
     with state_lock(directory) as acquired:
@@ -625,7 +701,7 @@ def handle_stop(payload: dict[str, Any], directory: Path) -> None:
             return
         status = state.get("status")
         if status not in ACTIVE_STATUSES:
-            emit(source_free_stop_correction(payload) or {})
+            emit({})
             return
         remaining = int(state.get("remaining_units") or 0)
         waiting = bool(state.get("waiting_for_user", False))
