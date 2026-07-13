@@ -2,11 +2,13 @@
 
 Office OS is a local-first Codex plugin for ordinary office work. A user can ask in plain language to find, review, create, update, combine, or schedule work involving Excel, Word, PowerPoint, and PDF files. The plugin classifies the request, asks one question at a time only when an owner decision is missing, completes the work in useful chunks, and keeps the original files unchanged.
 
-The first visible line of an Office OS turn is an intent envelope such as:
+Office OS begins an Office turn with a compact intent classification. When a local source is named, its formal reply uses an intent envelope such as:
 
 ```text
 意圖：更新｜物件：Excel｜權限：固定輸出覆寫｜檢查：快速
 ```
+
+When the user has not supplied a local source, Office OS asks for the source before it inspects or alters Office data.
 
 ## File support
 

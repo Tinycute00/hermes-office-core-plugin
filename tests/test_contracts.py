@@ -88,11 +88,12 @@ class ContractCase(unittest.TestCase):
             ),
             description,
         )
+        self.assertIn("structured intent/object/read-only summary", description)
         self.assertIn(
-            "意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]",
+            "Prefer 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]",
             description,
         )
-        self.assertIn("Ask one source-path question", description)
+        self.assertIn("one source-path question", description)
         self.assertIn("No Office data work before source", description)
 
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
@@ -146,6 +147,14 @@ class ContractCase(unittest.TestCase):
                 "no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message",
             ):
                 self.assertIn(marker, text)
+            self.assertIn("with a named local source path or folder", text)
+            self.assertIn("structured intent/object/read-only summary", text)
+
+    def test_readme_describes_source_free_intake_as_classification_first(self) -> None:
+        text = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("compact intent classification", text)
+        self.assertIn("not supplied a local source", text)
+        self.assertIn("before it inspects or alters Office data", text)
 
     def test_workflow_has_no_unbounded_or_automatic_policy(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(

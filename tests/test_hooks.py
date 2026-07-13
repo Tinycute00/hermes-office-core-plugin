@@ -135,9 +135,10 @@ class HookCase(unittest.TestCase):
             context,
         )
         self.assertIn(
-            "After loading this skill, provide this canonical envelope and one source request:",
+            "After loading this skill, provide a structured intent/object/read-only summary and one source request.",
             context,
         )
+        self.assertIn("Prefer this canonical envelope when host output allows:", context)
         self.assertIn("意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速", context)
         self.assertIn("Do not inspect or alter Office data", context)
         self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
