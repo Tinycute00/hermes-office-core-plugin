@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { InvalidParamsError, runProtocol } = require("./officecli-mcp/jsonrpc.cjs");
-const { PathPolicyError } = require("./officecli-mcp/paths.cjs");
+const { PathPolicyError, isLinklike, linkedAncestor } = require("./officecli-mcp/paths.cjs");
 const { PolicyError, TOOL, parseToolArguments } = require("./officecli-mcp/policy.cjs");
 const { runTool } = require("./officecli-mcp/runner.cjs");
 
@@ -49,7 +49,8 @@ function loadLock() {
 
 function pluginDataRoot() {
   const configured = process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
-  return path.resolve(configured || path.join(require("node:os").tmpdir(), "office-os-plugin-data"));
+  if (!configured) throw new RuntimeIntegrityError("OfficeCLI requires the plugin-owned PLUGIN_DATA value");
+  return path.resolve(configured);
 }
 
 function managedBinary(lock) {
@@ -70,7 +71,7 @@ function managedBinary(lock) {
 }
 
 function linklike(filename) {
-  return fs.lstatSync(filename).isSymbolicLink();
+  return isLinklike(filename, fs.lstatSync(filename));
 }
 
 function contained(rootPath, candidate) {
@@ -82,6 +83,9 @@ function verifyManagedRuntime() {
   const lock = loadLock();
   const { asset, binary } = managedBinary(lock);
   const dataRoot = pluginDataRoot();
+  if (linkedAncestor(dataRoot)) {
+    throw new RuntimeIntegrityError("managed runtime is missing, linked, or invalid");
+  }
   const runtimesRoot = path.join(dataRoot, "runtimes");
   const runtimeRoot = path.dirname(path.dirname(binary));
   const versionRoot = path.dirname(binary);
@@ -95,6 +99,7 @@ function verifyManagedRuntime() {
   }
   const status = fs.lstatSync(binary);
   if (!status.isFile()) throw new RuntimeIntegrityError("managed runtime is not an ordinary file");
+  if (status.nlink > 1) throw new RuntimeIntegrityError("managed runtime must not be hard linked");
   const realRoot = fs.realpathSync.native(dataRoot);
   const realBinary = fs.realpathSync.native(binary);
   if (!contained(realRoot, realBinary)) throw new RuntimeIntegrityError("managed runtime canonical path escapes its root");

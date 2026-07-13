@@ -27,10 +27,13 @@ function isRecord(value) {
 }
 
 async function dispatch(message, state, adapter) {
-  if (!isRecord(message) || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
-    return errorResponse(hasOwn(message || {}, "id") ? message.id : null, -32600, "Invalid Request");
+  const record = isRecord(message);
+  const idPresent = record && hasOwn(message, "id");
+  const validId = !idPresent || message.id === null || typeof message.id === "string" || (typeof message.id === "number" && Number.isFinite(message.id));
+  if (!record || message.jsonrpc !== "2.0" || typeof message.method !== "string" || !validId) {
+    return errorResponse(idPresent && validId ? message.id : null, -32600, "Invalid Request");
   }
-  const notification = !hasOwn(message, "id");
+  const notification = !idPresent;
   if (notification) {
     if (message.method === "notifications/initialized" && state.initialized) {
       state.clientReady = true;

@@ -8,6 +8,7 @@ const { candidateRoot } = require("./paths.cjs");
 const CONSTANTS = Object.freeze({
   normalTimeoutMs: 60_000,
   screenshotTimeoutMs: 120_000,
+  terminationGraceMs: 5_000,
   streamLimitBytes: 8 * 1024 * 1024,
   pngLimitBytes: 16 * 1024 * 1024,
 });
@@ -29,30 +30,44 @@ class RunnerError extends Error {
 function childEnvironment() {
   const environment = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith("OFFICECLI_") && value !== undefined) environment[key] = value;
+    if (!key.toUpperCase().startsWith("OFFICECLI_") && value !== undefined) environment[key] = value;
   }
   return { ...environment, ...MANAGED_ENV };
 }
 
-function killTree(child) {
-  if (!child.pid) return Promise.resolve();
+function killTree(child, timeoutMs) {
+  if (!child.pid) return Promise.resolve(false);
   if (process.platform === "win32") {
     return new Promise((resolve) => {
+      let settled = false;
+      const settle = (terminated) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(terminated);
+      };
       const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
         stdio: "ignore",
         windowsHide: true,
         shell: false,
       });
-      killer.on("error", resolve);
-      killer.on("close", resolve);
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      killer.once("error", () => settle(false));
+      killer.once("close", (code) => settle(code === 0));
     });
   }
   try {
     process.kill(-child.pid, "SIGKILL");
+    return Promise.resolve(true);
   } catch (error) {
-    if (error.code !== "ESRCH") child.kill("SIGKILL");
+    if (error.code === "ESRCH") return Promise.resolve(true);
+    try {
+      child.kill("SIGKILL");
+      return Promise.resolve(true);
+    } catch {
+      return Promise.resolve(false);
+    }
   }
-  return Promise.resolve();
 }
 
 function appendBounded(chunks, chunk, current, limit) {
@@ -61,7 +76,7 @@ function appendBounded(chunks, chunk, current, limit) {
   return current + chunk.length;
 }
 
-function runProcess(binary, argv, timeoutMs) {
+function runProcess(binary, argv, timeoutMs, terminationDeadlineMs = CONSTANTS.terminationGraceMs) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, argv, {
       env: childEnvironment(),
@@ -76,12 +91,30 @@ function runProcess(binary, argv, timeoutMs) {
     let stderrSize = 0;
     let failure = null;
     let killPromise = Promise.resolve();
+    let terminalTimer = null;
+    let settled = false;
+    let timer = null;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(terminalTimer);
+      callback();
+    };
+    const failureResult = (message) => {
+      const stdout = Buffer.concat(stdoutChunks);
+      const stderr = Buffer.concat(stderrChunks);
+      finish(() => reject(new RunnerError(message, stdout, stderr)));
+    };
     const stop = (reason) => {
       if (failure !== null) return;
       failure = reason;
-      killPromise = killTree(child);
+      killPromise = killTree(child, terminationDeadlineMs);
+      terminalTimer = setTimeout(() => {
+        failureResult(`${reason} Process termination did not complete.`);
+      }, terminationDeadlineMs);
     };
-    const timer = setTimeout(() => stop("OfficeCLI command timed out."), timeoutMs);
+    timer = setTimeout(() => stop("OfficeCLI command timed out."), timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdoutSize = appendBounded(stdoutChunks, chunk, stdoutSize, CONSTANTS.streamLimitBytes);
       if (stdoutSize > CONSTANTS.streamLimitBytes) stop("OfficeCLI stdout exceeded 8 MiB.");
@@ -91,18 +124,16 @@ function runProcess(binary, argv, timeoutMs) {
       if (stderrSize > CONSTANTS.streamLimitBytes) stop("OfficeCLI stderr exceeded 8 MiB.");
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(new RunnerError(`OfficeCLI could not start: ${error.message}`));
+      failureResult(`OfficeCLI could not start: ${error.message}`);
     });
     child.on("close", async (code) => {
-      clearTimeout(timer);
       await killPromise;
       const stdout = Buffer.concat(stdoutChunks);
       const stderr = Buffer.concat(stderrChunks);
       if (failure !== null) {
-        reject(new RunnerError(failure, stdout, stderr));
+        finish(() => reject(new RunnerError(failure, stdout, stderr)));
       } else {
-        resolve({ code: code === null ? 1 : code, stdout, stderr });
+        finish(() => resolve({ code: code === null ? 1 : code, stdout, stderr }));
       }
     });
   });
@@ -141,13 +172,21 @@ async function runScreenshot(binary, parsed, options) {
   if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) throw new RunnerError("Candidate root is linked or invalid.");
   const temporary = fs.mkdtempSync(path.join(root, ".officecli-shot-"));
   const output = path.join(temporary, "render.png");
+  let failure = null;
   try {
     const completed = await runProcess(binary, commandArguments(parsed.argv, output), options.timeoutMs || CONSTANTS.screenshotTimeoutMs);
     if (completed.code !== 0) throw new RunnerError(`OfficeCLI exited with code ${completed.code}.`, completed.stdout, completed.stderr);
     const data = assertPng(output);
     return { content: [{ type: "image", data: data.toString("base64"), mimeType: "image/png" }] };
+  } catch (error) {
+    failure = error instanceof RunnerError ? error : new RunnerError("Screenshot processing failed.");
+    throw failure;
   } finally {
-    fs.rmSync(temporary, { recursive: true, force: true });
+    try {
+      fs.rmSync(temporary, { recursive: true, force: true });
+    } catch (error) {
+      if (failure === null) throw new RunnerError("Screenshot temporary cleanup failed.");
+    }
   }
 }
 
