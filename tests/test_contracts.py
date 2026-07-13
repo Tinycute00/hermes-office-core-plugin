@@ -89,6 +89,7 @@ class ContractCase(unittest.TestCase):
             description,
         )
         self.assertIn("intent envelope, then source-path question", description)
+        self.assertIn("explicit UTF-8 on Windows", description)
         self.assertNotIn("Prefer", description)
         self.assertIn("No Office data work before source", description)
 
@@ -146,7 +147,6 @@ class ContractCase(unittest.TestCase):
             ):
                 self.assertIn(marker, text)
             self.assertIn("with a named local source path or folder", text)
-            self.assertIn("Use `權限：唯讀` in that envelope", text)
             self.assertIn(
                 "exactly one final assistant message with exactly two non-empty lines",
                 text,
@@ -155,6 +155,10 @@ class ContractCase(unittest.TestCase):
                 "first line is the intent envelope and the second line is the one short source question",
                 text,
             )
+            self.assertIn("<required-final-reply>", text)
+            self.assertIn("copy", text.lower())
+            self.assertIn("verbatim", text)
+            self.assertIn("Get-Content -Raw -Encoding UTF8", text)
             self.assertNotIn("Prefer the canonical envelope", text)
 
     def test_readme_describes_source_free_intake_as_classification_first(self) -> None:

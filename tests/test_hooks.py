@@ -140,11 +140,15 @@ class HookCase(unittest.TestCase):
 
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
         self.assertIn(
-            "FINAL USER-VISIBLE REPLY MUST BE EXACTLY TWO NON-EMPTY LINES:",
+            "FINAL USER-VISIBLE REPLY MUST BE EXACTLY TWO NON-EMPTY LINES.",
             context,
         )
+        self.assertIn("<required-final-reply>", context)
+        self.assertIn("</required-final-reply>", context)
+        self.assertIn("Get-Content -Raw -Encoding UTF8", context)
+        self.assertIn("Never rely on default Windows PowerShell decoding", context)
         self.assertIn(
-            "Use the supplied envelope and source question verbatim; do not emit a preamble, plan, skill announcement, or separate progress message.",
+            "Copy the two lines inside <required-final-reply> verbatim as the entire final reply",
             context,
         )
         self.assertIn("意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速", context)

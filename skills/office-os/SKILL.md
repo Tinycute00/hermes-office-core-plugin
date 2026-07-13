@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "Source-free Office intake: return one self-contained two-line final reply (intent envelope, then source-path question) before workflow work under a read-only boundary. No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
+description: "Source-free Office intake: return one self-contained two-line final reply (intent envelope, then source-path question) before workflow work under a read-only boundary; use explicit UTF-8 on Windows. No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
 ---
 
 # Office OS
@@ -9,7 +9,9 @@ Turn an ordinary office request into a bounded, inspectable workflow. Keep the u
 
 ## 0. Source-free intake
 
-If the current prompt does not name a local source path or folder, return exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Use `權限：唯讀` in that envelope. Do not emit a separate preamble, plan, skill announcement, tool-activity summary, or progress message. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit `$office-os` invocation can load this skill, but do not load a workflow reference until the user provides a source.
+When a Windows shell reads this SKILL.md, use explicit UTF-8 (Get-Content -Raw -Encoding UTF8 in Windows PowerShell). Never rely on default Windows PowerShell decoding. If any non-ASCII text appears garbled, reread the file as UTF-8 before replying.
+
+If the current prompt does not name a local source path or folder, copy the two lines inside the hook context's <required-final-reply> block verbatim as exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Do not reconstruct or paraphrase those lines from this file. Do not emit a separate preamble, plan, skill announcement, tool-activity summary, or progress message. Do not inspect or alter Office data, call office_os.py, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit $office-os invocation can load this skill, but do not load a workflow reference until the user provides a source.
 
 ## 1. Classify the current turn
 
@@ -26,7 +28,7 @@ Choose one value per dimension:
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
-For a prompt without a named local source path or folder, the source-free intake rule takes priority over Office data work. The final reply must remain the self-contained two-line envelope and one source question after any allowed skill load. Only after that reply, and once the user names a source, read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
+For a prompt without a named local source path or folder, the source-free intake rule takes priority over Office data work. The final reply must remain the verbatim <required-final-reply> block content after any allowed skill load. Only after that reply, and once the user names a source, read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 
