@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
+from types import ModuleType, SimpleNamespace
 import unittest
 import zipfile
 from collections.abc import Sequence
@@ -20,14 +23,50 @@ CORE = ROOT / "skills" / "office-os" / "scripts" / "office_os.py"
 CANDIDATES = ROOT / "skills" / "office-os" / "scripts" / "office_candidates.py"
 
 
+class OfficeOSTestSetupError(RuntimeError):
+    pass
+
+
+def load_core_module() -> ModuleType:
+    module_name = "office_os_behavior_test"
+    spec = importlib.util.spec_from_file_location(module_name, CORE)
+    if spec is None or spec.loader is None:
+        raise OfficeOSTestSetupError("Unable to load Office OS core for behavioral test.")
+    module = importlib.util.module_from_spec(spec)
+    scripts = os.fspath(CORE.parent)
+    sys.path.insert(0, scripts)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(scripts)
+        sys.modules.pop(module_name, None)
+    return module
+
+
 def write_xlsx(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr(
             "[Content_Types].xml",
-            """<?xml version="1.0" encoding="UTF-8"?>
-            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>
-            """,
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>",
+        )
+        package.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="xl/workbook.xml"/>'
+            "</Relationships>",
         )
         package.writestr(
             "xl/workbook.xml",
@@ -63,7 +102,19 @@ def write_docx(path: Path, text: str) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr(
             "[Content_Types].xml",
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Override PartName="/word/document.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+            "</Types>",
+        )
+        package.writestr(
+            "_rels/.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="word/document.xml"/>'
+            "</Relationships>",
         )
         package.writestr(
             "word/document.xml",
@@ -82,7 +133,21 @@ def write_pptx(path: Path, text: str) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
         package.writestr(
             "[Content_Types].xml",
-            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Override PartName="/ppt/presentation.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>'
+            '<Override PartName="/ppt/slides/slide1.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
+            "</Types>",
+        )
+        package.writestr(
+            "_rels/.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+            'Target="ppt/presentation.xml"/>'
+            "</Relationships>",
         )
         package.writestr(
             "ppt/presentation.xml",
@@ -96,6 +161,14 @@ def write_pptx(path: Path, text: str) -> None:
               <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
             </p:sld>
             """,
+        )
+        package.writestr(
+            "ppt/_rels/presentation.xml.rels",
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" '
+            'Target="slides/slide1.xml"/>'
+            "</Relationships>",
         )
 
 
@@ -116,9 +189,20 @@ class CoreCase(unittest.TestCase):
     def run_core(
         self, command: str, *arguments: str, expected: int = 0
     ) -> tuple[dict, subprocess.CompletedProcess[str]]:
+        completed = self.run_core_raw(command, *arguments)
+        self.assertEqual(
+            completed.returncode,
+            expected,
+            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        return json.loads(completed.stdout), completed
+
+    def run_core_raw(
+        self, command: str, *arguments: str
+    ) -> subprocess.CompletedProcess[str]:
         environment = os.environ.copy()
         environment["PLUGIN_DATA"] = os.fspath(self.plugin_data)
-        completed = subprocess.run(
+        return subprocess.run(
             [
                 sys.executable,
                 os.fspath(CORE),
@@ -135,12 +219,6 @@ class CoreCase(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(
-            completed.returncode,
-            expected,
-            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
-        )
-        return json.loads(completed.stdout), completed
 
     def workspace_data(self) -> Path:
         roots = list((self.plugin_data / "workspaces").iterdir())
@@ -174,6 +252,25 @@ class CoreCase(unittest.TestCase):
         state, _ = self.run_core("begin", *arguments)
         self.assertEqual(state["status"], "executing")
         return state
+
+    def candidate_for(self, state: dict, name: str = "candidate.xlsx") -> Path:
+        return Path(state["candidate_directory"]) / name
+
+    def test_core_requires_hook_injected_plugin_data(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("PLUGIN_DATA", None)
+        environment.pop("CLAUDE_PLUGIN_DATA", None)
+        completed = subprocess.run(
+            [sys.executable, os.fspath(CORE), "status", "--cwd", os.fspath(self.workspace)],
+            cwd=self.workspace,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("PLUGIN_DATA", json.loads(completed.stdout)["error"])
 
     def test_index_upserts_queries_chinese_and_purges_deleted_sources(self) -> None:
         workbook = self.workspace / "budget.xlsx"
@@ -242,6 +339,46 @@ class CoreCase(unittest.TestCase):
 
         repeated, _ = self.run_core("index", "--path", os.fspath(self.workspace))
         self.assertEqual(repeated["unchanged"], 1)
+
+    def test_index_isolates_malformed_supported_documents(self) -> None:
+        malformed = {
+            ".docx": self.workspace / "broken.docx",
+            ".xlsx": self.workspace / "broken.xlsx",
+            ".pptx": self.workspace / "broken.pptx",
+        }
+        for extension, path in malformed.items():
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as package:
+                package.writestr("[Content_Types].xml", "<Types/>")
+                if extension == ".pptx":
+                    package.writestr("ppt/slides/slide1.xml", "<not-closed>")
+        broken_pdf = self.workspace / "broken.pdf"
+        broken_pdf.write_bytes(b"%PDF-1.4\nnot-a-valid-pdf\n%%EOF\n")
+        valid = self.workspace / "valid.xlsx"
+        write_xlsx(valid, "continues after malformed files")
+
+        result, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+
+        self.assertEqual((result["discovered"], result["indexed"], result["errors"]), (5, 5, 4))
+        database = sqlite3.connect(self.workspace_data() / "office.db")
+        try:
+            rows = database.execute(
+                "SELECT path, index_status, error FROM documents ORDER BY path"
+            ).fetchall()
+        finally:
+            database.close()
+        statuses = {Path(path).name: (status, error) for path, status, error in rows}
+        for path in (*malformed.values(), broken_pdf):
+            status, error = statuses[path.name]
+            self.assertEqual(status, "error")
+            self.assertTrue(error)
+            self.assertLessEqual(len(error), 500)
+        self.assertEqual(statuses[valid.name][0], "complete")
 
     def test_index_rejects_paths_outside_the_configured_workspace_root(self) -> None:
         outside = self.base / "outside"
@@ -351,10 +488,10 @@ class CoreCase(unittest.TestCase):
 
     def test_minimal_open_xml_package_cannot_replace_previous_output(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source")
+        state = self.begin_publish_run("套件驗證", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "valid-output")
-        self.begin_publish_run("套件驗證", (source,))
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -366,8 +503,10 @@ class CoreCase(unittest.TestCase):
         )
         target = Path(first["target"])
         previous = target.read_bytes()
+        self.run_core("complete", "--summary", "valid package")
 
-        minimal = self.workspace / "minimal.xlsx"
+        state = self.begin_publish_run("套件驗證", (source,))
+        minimal = self.candidate_for(state, "minimal.xlsx")
         with zipfile.ZipFile(minimal, "w", zipfile.ZIP_DEFLATED) as package:
             package.writestr("xl/workbook.xml", "<workbook/>")
         result, _ = self.run_core(
@@ -385,10 +524,10 @@ class CoreCase(unittest.TestCase):
 
     def test_scheduled_publish_requires_its_active_single_flight_lease(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source")
+        state = self.begin_publish_run("排程鎖", (source,), mode="scheduled")
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "candidate")
-        self.begin_publish_run("排程鎖", (source,), mode="scheduled")
         (self.workspace_data() / "single-flight.lock").unlink()
 
         result, _ = self.run_core(
@@ -412,11 +551,13 @@ class CoreCase(unittest.TestCase):
         indexed, _ = self.run_core("index", "--path", os.fspath(pdf))
         self.assertEqual(indexed["metadata_only"], 1)
 
-        self.begin_publish_run("PDF 唯讀", (pdf,))
+        state = self.begin_publish_run("PDF 唯讀", (pdf,))
+        candidate = self.candidate_for(state, "review.pdf")
+        candidate.write_bytes(pdf.read_bytes())
         result, _ = self.run_core(
             "publish",
             "--candidate",
-            os.fspath(pdf),
+            os.fspath(candidate),
             "--source",
             os.fspath(pdf),
             "--task",
@@ -427,11 +568,11 @@ class CoreCase(unittest.TestCase):
 
     def test_scheduled_publish_keeps_three_backups_and_unchanged_is_noop(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source-0")
+        state = self.begin_publish_run("季度整理", (source,), mode="scheduled")
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "output-0")
 
-        self.begin_publish_run("季度整理", (source,), mode="scheduled")
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -450,8 +591,9 @@ class CoreCase(unittest.TestCase):
 
         for number in range(1, 5):
             write_xlsx(source, f"source-{number}")
+            state = self.begin_publish_run("季度整理", (source,), mode="scheduled")
+            candidate = self.candidate_for(state)
             write_xlsx(candidate, f"output-{number}")
-            self.begin_publish_run("季度整理", (source,), mode="scheduled")
             self.run_core(
                 "publish",
                 "--candidate",
@@ -476,8 +618,9 @@ class CoreCase(unittest.TestCase):
             for path in target.parent.iterdir()
             if path == target or ".bak." in path.name
         }
+        state = self.begin_publish_run("季度整理", (source,), mode="scheduled")
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "should-not-publish")
-        self.begin_publish_run("季度整理", (source,), mode="scheduled")
         unchanged, _ = self.run_core(
             "publish",
             "--candidate",
@@ -500,10 +643,10 @@ class CoreCase(unittest.TestCase):
 
     def test_manual_publish_has_no_history_and_invalid_candidate_preserves_output(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source")
+        state = self.begin_publish_run("人工更新", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "good-output")
-        self.begin_publish_run("人工更新", (source,))
         result, _ = self.run_core(
             "publish",
             "--candidate",
@@ -516,8 +659,10 @@ class CoreCase(unittest.TestCase):
         target = Path(result["target"])
         expected = target.read_bytes()
         self.assertEqual(list(target.parent.glob("*.bak.*")), [])
+        self.run_core("complete", "--summary", "valid manual package")
 
-        bad = self.workspace / "bad.xlsx"
+        state = self.begin_publish_run("人工更新", (source,))
+        bad = self.candidate_for(state, "bad.xlsx")
         bad.write_text("not an Open XML package", encoding="utf-8")
         error, _ = self.run_core(
             "publish",
@@ -535,12 +680,12 @@ class CoreCase(unittest.TestCase):
     def test_managed_candidate_lifecycle_is_bounded_across_success_failure_and_restart(self) -> None:
         source = self.workspace / "source.xlsx"
         candidate_root = self.plugin_data / "officecli-candidates"
-        candidate = candidate_root / "run-1" / "candidate.xlsx"
         write_xlsx(source, "source")
+        state = self.begin_publish_run("受管候選成功", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "published-output")
         source_before = source.read_bytes()
 
-        self.begin_publish_run("受管候選成功", (source,))
         published, _ = self.run_core(
             "publish",
             "--candidate",
@@ -556,10 +701,9 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(source.read_bytes(), source_before)
         self.run_core("complete", "--summary", "published")
 
-        failed = candidate_root / "run-2" / "invalid.xlsx"
-        failed.parent.mkdir(parents=True)
+        state = self.begin_publish_run("受管候選失敗", (source,))
+        failed = self.candidate_for(state, "invalid.xlsx")
         failed.write_text("invalid", encoding="utf-8")
-        self.begin_publish_run("受管候選失敗", (source,))
         error, _ = self.run_core(
             "publish",
             "--candidate",
@@ -631,7 +775,7 @@ class CoreCase(unittest.TestCase):
                 else:
                     candidate_root.unlink()
 
-    def test_candidate_cleanup_skips_linked_entries_without_touching_outside_files(self) -> None:
+    def test_candidate_cleanup_removes_linked_entries_without_touching_outside_files(self) -> None:
         candidate_root = self.plugin_data / "officecli-candidates"
         candidate_root.mkdir(parents=True)
         outside = self.base / "outside-entry"
@@ -652,10 +796,8 @@ class CoreCase(unittest.TestCase):
         try:
             cleanup, _ = self.run_core("cleanup", "--older-than-seconds", "0")
             self.assertEqual(sentinel.read_bytes(), b"outside")
-            self.assertIn(
-                os.fspath(linked), cleanup["managed_candidates"]["skipped_links"]
-            )
-            self.assertTrue(os.path.lexists(linked))
+            self.assertEqual(cleanup["managed_candidates"]["skipped_links"], [])
+            self.assertFalse(os.path.lexists(linked))
         finally:
             if os.path.lexists(linked):
                 if os.name == "nt":
@@ -683,16 +825,39 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(result["remaining_bytes"], 20)
         self.assertEqual(result["removed_count"], 1)
 
+    def test_candidate_inventory_rejects_special_leaves(self) -> None:
+        spec = importlib.util.spec_from_file_location("office_candidates_test", CANDIDATES)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader if spec else None)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        spec.loader.exec_module(module)
+        root = self.plugin_data / "officecli-candidates"
+        root.mkdir(parents=True)
+        special = root / "special-leaf"
+        special.touch()
+        original_lstat = Path.lstat
+
+        def special_lstat(path: Path):
+            if path == special:
+                return SimpleNamespace(st_mode=module.stat.S_IFIFO, st_nlink=1)
+            return original_lstat(path)
+
+        with mock.patch.object(module, "is_linklike", return_value=False):
+            with mock.patch.object(module.Path, "lstat", new=special_lstat):
+                with self.assertRaisesRegex(module.CandidateLifecycleError, "ordinary"):
+                    module.inventory(root)
+
     def test_cross_file_noop_digest_covers_every_source(self) -> None:
         workbook = self.workspace / "source.xlsx"
         document = self.workspace / "source.docx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(workbook, "workbook-v1")
         write_docx(document, "document-v1")
-        write_xlsx(candidate, "combined-v1")
-        self.begin_publish_run(
+        state = self.begin_publish_run(
             "跨檔案整合", (workbook, document), mode="scheduled"
         )
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "combined-v1")
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -739,11 +904,11 @@ class CoreCase(unittest.TestCase):
 
     def test_publish_rejects_target_outside_fixed_output_directory(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         outside = self.workspace / "outside.xlsx"
         write_xlsx(source, "source")
+        state = self.begin_publish_run("固定位置", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "candidate")
-        self.begin_publish_run("固定位置", (source,))
         result, _ = self.run_core(
             "publish",
             "--candidate",
@@ -761,10 +926,10 @@ class CoreCase(unittest.TestCase):
 
     def test_task_start_fingerprint_blocks_publish_after_source_mutation(self) -> None:
         source = self.workspace / "source.xlsx"
-        candidate = self.workspace / "candidate.xlsx"
         write_xlsx(source, "source-v1")
+        state = self.begin_publish_run("來源保護", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(candidate, "output-v1")
-        self.begin_publish_run("來源保護", (source,))
         first, _ = self.run_core(
             "publish",
             "--candidate",
@@ -778,23 +943,8 @@ class CoreCase(unittest.TestCase):
         previous = target.read_bytes()
         self.run_core("complete", "--summary", "baseline")
 
-        self.run_core(
-            "begin",
-            "--task",
-            "來源保護",
-            "--source",
-            os.fspath(source),
-            "--intent",
-            "update",
-            "--object",
-            "excel",
-            "--permission",
-            "fixed-output-write",
-            "--qa",
-            "fast",
-            "--units",
-            "1",
-        )
+        state = self.begin_publish_run("來源保護", (source,))
+        candidate = self.candidate_for(state)
         write_xlsx(source, "source-was-mutated")
         write_xlsx(candidate, "output-v2")
         result, _ = self.run_core(
@@ -851,6 +1001,781 @@ class CoreCase(unittest.TestCase):
         latest = json.loads((data / "latest_summary.json").read_text(encoding="utf-8"))
         self.assertEqual(latest["summary"], "第二輪完成")
 
+    def test_complete_but_malformed_open_xml_cannot_replace_output(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("完整套件驗證", (source,))
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "good")
+        published, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "完整套件驗證",
+        )
+        target = Path(published["target"])
+        previous = target.read_bytes()
+        self.run_core("complete", "--summary", "baseline")
+
+        state = self.begin_publish_run("完整套件驗證", (source,))
+        malformed = self.candidate_for(state, "malformed.xlsx")
+        with zipfile.ZipFile(malformed, "w", zipfile.ZIP_DEFLATED) as package:
+            package.writestr(
+                "[Content_Types].xml",
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            )
+            package.writestr("xl/workbook.xml", "not xml")
+            package.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>',
+            )
+            package.writestr(
+                "xl/worksheets/sheet1.xml",
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+            )
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(malformed),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "完整套件驗證",
+            expected=2,
+        )
+        self.assertIn("XML", result["error"])
+        self.assertEqual(target.read_bytes(), previous)
+        self.run_core("fail", "--reason", "invalid package")
+
+    def test_long_task_identities_and_stable_targets_do_not_collide(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        prefix = "季度報表" * 30
+        tasks = (
+            f"{prefix}-甲",
+            f"{prefix}-乙",
+            "Revenue / Cost",
+            "Revenue \\ Cost",
+        )
+        states: list[dict] = []
+        targets: list[Path] = []
+        for index, task in enumerate(tasks):
+            state = self.begin_publish_run(task, (source,))
+            candidate = self.candidate_for(state)
+            write_xlsx(candidate, f"output-{index}")
+            states.append(state)
+            published, _ = self.run_core(
+                "publish",
+                "--candidate",
+                os.fspath(candidate),
+                "--source",
+                os.fspath(source),
+                "--task",
+                task,
+            )
+            targets.append(Path(published["target"]))
+            self.run_core("complete", "--summary", f"task-{index}")
+        self.assertEqual(len({state["task_key"] for state in states}), len(tasks))
+        self.assertEqual(len(set(targets)), len(tasks))
+        self.assertTrue(all(target.is_file() for target in targets))
+
+        module = load_core_module()
+        self.assertEqual(
+            module.stable_task_key("Revenue / Cost"),
+            module.stable_task_key("  REVENUE   /   COST  "),
+        )
+        self.assertEqual(
+            module.safe_task_filename("Revenue / Cost"),
+            module.safe_task_filename("  REVENUE   /   COST  "),
+        )
+
+        state = self.begin_publish_run(tasks[0], (source,))
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "alternate-attempt")
+        alternate = targets[0].parent / "alternate.xlsx"
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            tasks[0],
+            "--target",
+            os.fspath(alternate),
+            expected=2,
+        )
+        self.assertIn("stable target", result["error"])
+        self.assertFalse(alternate.exists())
+        self.run_core("fail", "--reason", "target mismatch")
+
+    def test_query_rejects_unbounded_limit_and_text_sizes(self) -> None:
+        cases = (
+            ("--limit", "-1"),
+            ("--limit", "101"),
+            ("--max-chars", "0"),
+            ("--max-chars", "8001"),
+        )
+        for option, value in cases:
+            with self.subTest(option=option, value=value):
+                completed = self.run_core_raw("query", "--text", "test", option, value)
+                self.assertEqual(completed.returncode, 2)
+                self.assertIn("out of range", completed.stderr)
+
+    def test_plugin_data_and_candidates_are_never_indexed(self) -> None:
+        self.plugin_data = self.workspace / ".office-os-plugin-data"
+        candidate = self.plugin_data / "officecli-candidates" / "run" / "private.xlsx"
+        normal = self.workspace / "normal.xlsx"
+        write_xlsx(candidate, "candidate-secret")
+        write_xlsx(normal, "normal-content")
+        indexed, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+        self.assertEqual(indexed["discovered"], 1)
+        secret, _ = self.run_core("query", "--text", "candidate-secret")
+        self.assertEqual(secret["count"], 0)
+
+    def test_active_candidate_survives_cross_workspace_pruning(self) -> None:
+        first_workspace = self.workspace
+        source = first_workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("待修訂候選", (source,))
+        candidate = self.candidate_for(state)
+        candidate.write_text("invalid", encoding="utf-8")
+        self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "待修訂候選",
+            expected=2,
+        )
+        os.utime(candidate, (0, 0))
+
+        second_workspace = self.base / "second-workspace"
+        second_workspace.mkdir()
+        self.workspace = second_workspace
+        second, _ = self.run_core(
+            "begin",
+            "--task",
+            "另一個工作區",
+            "--intent",
+            "update",
+            "--object",
+            "excel",
+            "--permission",
+            "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+        )
+        self.assertEqual(second["status"], "executing")
+        self.assertTrue(candidate.exists())
+        self.run_core("complete", "--summary", "second complete")
+        self.workspace = first_workspace
+        self.run_core("fail", "--reason", "first cleanup")
+
+    def test_begin_reserves_candidate_directory_before_first_publish(self) -> None:
+        first_workspace = self.workspace
+        source = first_workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        first = self.begin_publish_run("撰寫中候選", (source,))
+        candidate_directory = Path(first["candidate_directory"])
+        candidate = candidate_directory / "candidate.xlsx"
+        write_xlsx(candidate, "draft")
+        os.utime(candidate, (0, 0))
+
+        second_workspace = self.base / "second-workspace"
+        second_workspace.mkdir()
+        self.workspace = second_workspace
+        self.begin_publish_run("另一工作區", ())
+        self.assertTrue(candidate.is_file())
+        self.run_core("complete", "--summary", "second complete")
+
+        self.workspace = first_workspace
+        self.run_core("fail", "--reason", "first cleanup")
+        self.assertFalse(candidate_directory.exists())
+
+    def test_publish_requires_reserved_directory_and_rejects_hard_links(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("候選授權", (source,))
+        reserved = Path(state["candidate_directory"])
+        sibling = reserved.parent / "other-run" / "candidate.xlsx"
+        write_xlsx(sibling, "outside-reservation")
+
+        outside_result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(sibling),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "候選授權",
+            expected=2,
+        )
+        self.assertIn("reserved", outside_result["error"])
+        active = json.loads(
+            (self.workspace_data() / "run_state.json").read_text(encoding="utf-8")
+        )
+        self.assertIsNone(active["candidate"])
+
+        outside = self.base / "outside-candidate.xlsx"
+        write_xlsx(outside, "hard-linked")
+        linked = reserved / "candidate.xlsx"
+        os.link(outside, linked)
+        before = hashlib.sha256(outside.read_bytes()).hexdigest()
+        hardlink_result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(linked),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "候選授權",
+            expected=2,
+        )
+        self.assertIn("hard", hardlink_result["error"])
+        self.assertEqual(hashlib.sha256(outside.read_bytes()).hexdigest(), before)
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+    def test_candidate_cleanup_fails_closed_on_semantically_invalid_active_state(self) -> None:
+        state = self.begin_publish_run("語意損壞狀態", ())
+        candidate_directory = Path(state["candidate_directory"])
+        candidate = candidate_directory / "candidate.xlsx"
+        write_xlsx(candidate, "draft")
+        state_path = self.workspace_data() / "run_state.json"
+        cases = (
+            {**state, "candidate_directory": 42},
+            {key: value for key, value in state.items() if key != "candidate_directory"},
+            {**state, "candidate_directory": os.fspath(self.base / "outside")},
+            {**state, "candidate": 42},
+        )
+        for malformed in cases:
+            with self.subTest(malformed=malformed):
+                state_path.write_text(json.dumps(malformed), encoding="utf-8")
+                result, _ = self.run_core(
+                    "cleanup", "--older-than-seconds", "0", expected=2
+                )
+                self.assertIn("active", result["error"])
+                self.assertTrue(candidate.is_file())
+
+    def test_candidate_cleanup_fails_closed_on_malformed_active_inventory(self) -> None:
+        first_workspace = self.workspace
+        state = self.begin_publish_run("損壞狀態", ())
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "draft")
+        os.utime(candidate, (0, 0))
+        (self.workspace_data() / "run_state.json").write_text("{", encoding="utf-8")
+
+        second_workspace = self.base / "second-workspace"
+        second_workspace.mkdir()
+        self.workspace = second_workspace
+        result, _ = self.run_core(
+            "begin",
+            "--task",
+            "第二工作區",
+            "--intent",
+            "update",
+            "--object",
+            "office",
+            "--permission",
+            "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+            expected=2,
+        )
+        self.assertIn("run state", result["error"])
+        self.assertTrue(candidate.is_file())
+        self.workspace = first_workspace
+
+    def test_publish_rejects_linked_output_directory(self) -> None:
+        source = self.workspace / "source.xlsx"
+        outside = self.base / "outside-output"
+        outside.mkdir()
+        write_xlsx(source, "source")
+        output = self.workspace / "Office OS Output"
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(output), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            output.symlink_to(outside, target_is_directory=True)
+        try:
+            state = self.begin_publish_run("輸出邊界", (source,))
+            candidate = self.candidate_for(state)
+            write_xlsx(candidate, "candidate")
+            result, _ = self.run_core(
+                "publish",
+                "--candidate",
+                os.fspath(candidate),
+                "--source",
+                os.fspath(source),
+                "--task",
+                "輸出邊界",
+                expected=2,
+            )
+            self.assertIn("linked", result["error"])
+            self.assertEqual(list(outside.iterdir()), [])
+            self.run_core("fail", "--reason", "linked output")
+        finally:
+            if os.path.lexists(output):
+                if os.name == "nt":
+                    os.rmdir(output)
+                else:
+                    output.unlink()
+
+    def test_cleanup_rejects_linked_output_directory_without_following_it(self) -> None:
+        outside = self.base / "outside-output"
+        outside.mkdir()
+        sentinel = outside / ".office-os-old.tmp"
+        sentinel.write_text("outside", encoding="utf-8")
+        os.utime(sentinel, (0, 0))
+        output = self.workspace / "Office OS Output"
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(output), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            output.symlink_to(outside, target_is_directory=True)
+        try:
+            result, _ = self.run_core(
+                "cleanup",
+                "--path",
+                os.fspath(self.workspace),
+                "--older-than-seconds",
+                "0",
+                expected=2,
+            )
+            self.assertIn("linked", result["error"])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+        finally:
+            if os.path.lexists(output):
+                if os.name == "nt":
+                    os.rmdir(output)
+                else:
+                    output.unlink()
+
+    def test_core_rejects_linked_workspace_state_ancestors(self) -> None:
+        self.plugin_data.mkdir()
+        outside = self.base / "outside-workspaces"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        workspaces = self.plugin_data / "workspaces"
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(workspaces), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            workspaces.symlink_to(outside, target_is_directory=True)
+        try:
+            result, _ = self.run_core(
+                "begin",
+                "--task",
+                "連結工作區狀態",
+                "--intent",
+                "update",
+                "--object",
+                "office",
+                "--permission",
+                "fixed-output-write",
+                "--qa",
+                "fast",
+                "--units",
+                "1",
+                expected=2,
+            )
+            self.assertIn("linked", result["error"])
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(list(outside.iterdir()), [sentinel])
+        finally:
+            if os.path.lexists(workspaces):
+                if os.name == "nt":
+                    os.rmdir(workspaces)
+                else:
+                    workspaces.unlink()
+
+    def test_open_xml_relationship_targets_must_exist(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("關聯驗證", (source,))
+        candidate = self.candidate_for(state, "missing-relationship.xlsx")
+        with zipfile.ZipFile(candidate, "w", zipfile.ZIP_DEFLATED) as package:
+            package.writestr(
+                "[Content_Types].xml",
+                '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                '<Default Extension="rels" '
+                'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                '<Override PartName="/xl/workbook.xml" '
+                'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                '<Override PartName="/xl/worksheets/other.xml" '
+                'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                "</Types>",
+            )
+            package.writestr(
+                "_rels/.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+                'Target="xl/workbook.xml"/>'
+                "</Relationships>",
+            )
+            package.writestr(
+                "xl/workbook.xml",
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+            )
+            package.writestr(
+                "xl/_rels/workbook.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rId1" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+                'Target="worksheets/missing.xml" />'
+                "</Relationships>",
+            )
+            package.writestr(
+                "xl/worksheets/other.xml",
+                '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>',
+            )
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "關聯驗證",
+            expected=2,
+        )
+        self.assertIn("relationship target is missing", result["error"])
+        self.run_core("fail", "--reason", "missing relationship")
+
+    def test_core_rejects_linked_plugin_data_before_state_write(self) -> None:
+        real_data = self.base / "real-plugin-data"
+        real_data.mkdir()
+        sentinel = real_data / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        linked_data = self.base / "linked-plugin-data"
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(linked_data), os.fspath(real_data)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            linked_data.symlink_to(real_data, target_is_directory=True)
+        self.plugin_data = linked_data
+        try:
+            result, _ = self.run_core(
+                "begin",
+                "--task",
+                "連結資料根",
+                "--intent",
+                "update",
+                "--object",
+                "excel",
+                "--permission",
+                "fixed-output-write",
+                "--qa",
+                "fast",
+                "--units",
+                "1",
+                expected=2,
+            )
+            self.assertIn("linked", result["error"])
+            self.assertFalse((real_data / "workspaces").exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+        finally:
+            if os.path.lexists(linked_data):
+                if os.name == "nt":
+                    os.rmdir(linked_data)
+                else:
+                    linked_data.unlink()
+
+    def test_core_rejects_linked_plugin_data_ancestor_before_state_write(self) -> None:
+        outside = self.base / "outside-ancestor"
+        plugin_data = outside / "plugin-data"
+        plugin_data.mkdir(parents=True)
+        sentinel = plugin_data / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        linked_parent = self.base / "linked-parent"
+        if os.name == "nt":
+            linked = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(linked_parent), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked.returncode, 0, linked.stderr)
+        else:
+            linked_parent.symlink_to(outside, target_is_directory=True)
+        self.plugin_data = linked_parent / "plugin-data"
+        try:
+            result, _ = self.run_core(
+                "begin",
+                "--task",
+                "連結資料祖先",
+                "--intent",
+                "update",
+                "--object",
+                "office",
+                "--permission",
+                "fixed-output-write",
+                "--qa",
+                "fast",
+                "--units",
+                "1",
+                expected=2,
+            )
+            self.assertIn("linked", result["error"])
+            self.assertFalse((plugin_data / "workspaces").exists())
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
+        finally:
+            if os.path.lexists(linked_parent):
+                if os.name == "nt":
+                    os.rmdir(linked_parent)
+                else:
+                    linked_parent.unlink()
+
+    def test_state_lock_does_not_take_over_a_live_owner_with_old_mtime(self) -> None:
+        module = load_core_module()
+        lock_directory = self.base / "locks"
+        lock_directory.mkdir()
+        first = module.state_lock(lock_directory, timeout=0.1)
+        first.__enter__()
+        try:
+            lock_path = lock_directory / "run-state.lock"
+            os.utime(lock_path, (0, 0))
+            with self.assertRaises(module.OfficeOSError):
+                with module.state_lock(lock_directory, timeout=0.05):
+                    pass
+        finally:
+            first.__exit__(None, None, None)
+
+        with module.state_lock(lock_directory, timeout=0.1):
+            self.assertTrue((lock_directory / "run-state.lock").is_file())
+
+    def test_state_lock_recovers_after_owner_process_terminates(self) -> None:
+        module = load_core_module()
+        lock_directory = self.base / "locks"
+        lock_directory.mkdir()
+        ready = self.base / "lock-ready"
+        script = (
+            "import importlib.util, os, sys, time\n"
+            "from pathlib import Path\n"
+            "core=Path(sys.argv[1]); sys.path.insert(0, os.fspath(core.parent))\n"
+            "spec=importlib.util.spec_from_file_location('office_os_lock_child', core)\n"
+            "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module\n"
+            "spec.loader.exec_module(module)\n"
+            "with module.state_lock(Path(sys.argv[2]), timeout=1.0):\n"
+            "    Path(sys.argv[3]).write_text('ready', encoding='ascii')\n"
+            "    time.sleep(30)\n"
+        )
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                os.fspath(CORE),
+                os.fspath(lock_directory),
+                os.fspath(ready),
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        try:
+            deadline = time.monotonic() + 5.0
+            while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.025)
+            self.assertTrue(ready.is_file(), f"lock child exited with {process.poll()}")
+            with self.assertRaises(module.OfficeOSError):
+                with module.state_lock(lock_directory, timeout=0.05):
+                    pass
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
+        with module.state_lock(lock_directory, timeout=0.1):
+            self.assertTrue((lock_directory / "run-state.lock").is_file())
+
+    def test_core_state_hardlinks_are_refused_without_mutating_sentinels(self) -> None:
+        module = load_core_module()
+
+        def enter_lock(directory: Path) -> None:
+            with module.state_lock(directory, timeout=0.05):
+                pass
+
+        def write_state(directory: Path) -> None:
+            module.write_json(directory / "run_state.json", {"status": "executing"})
+
+        def open_database(directory: Path) -> None:
+            connection = module.connect_database(directory)
+            connection.close()
+
+        def acquire_single_flight(directory: Path) -> None:
+            module.acquire_single_flight(directory, "run-id", "task-key")
+
+        cases = (
+            ("run-state.lock", b"outside lock sentinel", enter_lock),
+            ("run_state.json", b"outside state sentinel", write_state),
+            ("office.db", b"", open_database),
+            ("office.db-wal", b"outside WAL sentinel", open_database),
+            ("office.db-shm", b"outside SHM sentinel", open_database),
+            ("office.db-journal", b"outside journal sentinel", open_database),
+            ("single-flight.lock", b"outside schedule sentinel", acquire_single_flight),
+        )
+        for name, contents, action in cases:
+            with self.subTest(name=name):
+                directory = self.base / f"hardlink-{name}"
+                directory.mkdir()
+                sentinel = self.base / f"outside-{name}"
+                sentinel.write_bytes(contents)
+                os.link(sentinel, directory / name)
+                before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+                with self.assertRaises(module.OfficeOSError):
+                    action(directory)
+                self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+        directory = self.base / "hardlink-temporary"
+        directory.mkdir()
+        sentinel = self.base / "outside-temporary"
+        sentinel.write_bytes(b"outside temporary sentinel")
+        temporary = directory / f".office-os-run_state.json.{os.getpid()}.tmp"
+        os.link(sentinel, temporary)
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        with self.assertRaises(module.OfficeOSError):
+            write_state(directory)
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_committed_publish_reports_success_when_candidate_cleanup_fails(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        begun = self.begin_publish_run("提交後清理", (source,))
+        candidate = self.candidate_for(begun)
+        write_xlsx(candidate, "candidate")
+        directory = self.workspace_data()
+        module = load_core_module()
+        messages = []
+        arguments = SimpleNamespace(
+            candidate=os.fspath(candidate),
+            source=[os.fspath(source)],
+            task="提交後清理",
+            mode="manual",
+            target=None,
+            cwd=os.fspath(self.workspace),
+        )
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            with mock.patch.object(
+                module,
+                "remove_managed_candidate",
+                side_effect=module.CandidateLifecycleError("synthetic cleanup failure"),
+            ):
+                with mock.patch.object(module, "json_print", side_effect=messages.append):
+                    self.assertEqual(module.publish_candidate(arguments, directory), 0)
+        result = messages[-1]
+        self.assertEqual(result["status"], "published")
+        self.assertIn("synthetic cleanup failure", result["candidate_cleanup_error"])
+        self.assertTrue(Path(result["target"]).is_file())
+        state = json.loads((directory / "run_state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["candidate"], os.fspath(candidate))
+        self.assertIsNotNone(state["candidate_directory"])
+        self.run_core("complete", "--summary", "published with deferred cleanup")
+
+    def test_committed_publish_ignores_malformed_prior_publish_record(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        begun = self.begin_publish_run("提交後毀損紀錄", (source,))
+        candidate = self.candidate_for(begun)
+        write_xlsx(candidate, "candidate")
+        directory = self.workspace_data()
+        (directory / "publish_state.json").write_text(
+            json.dumps({"tasks": {"corrupt": {"target": 1}}}), encoding="utf-8"
+        )
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "提交後毀損紀錄",
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(Path(result["target"]).is_file())
+        records = json.loads((directory / "publish_state.json").read_text(encoding="utf-8"))
+        self.assertNotIn("corrupt", records["tasks"])
+
+    def test_committed_publish_reports_success_when_final_state_write_fails(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        begun = self.begin_publish_run("提交後狀態", (source,))
+        candidate = Path(begun["candidate_directory"]) / "candidate.xlsx"
+        write_xlsx(candidate, "candidate")
+        directory = self.workspace_data()
+        module = load_core_module()
+        messages: list[dict] = []
+        arguments = SimpleNamespace(
+            candidate=os.fspath(candidate),
+            source=[os.fspath(source)],
+            task="提交後狀態",
+            mode="manual",
+            target=None,
+            cwd=os.fspath(self.workspace),
+        )
+        original_write_json = module.write_json
+
+        def fail_final_state_write(path: Path, value) -> None:
+            if path == module.run_state_path(directory) and isinstance(value, dict):
+                if value.get("candidate") is None:
+                    raise OSError("synthetic final state failure")
+            original_write_json(path, value)
+
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            with mock.patch.object(module, "write_json", side_effect=fail_final_state_write):
+                with mock.patch.object(module, "json_print", side_effect=messages.append):
+                    self.assertEqual(module.publish_candidate(arguments, directory), 0)
+        result = messages[-1]
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(Path(result["target"]).is_file())
+        self.assertTrue(
+            any("synthetic final state failure" in item for item in result["post_commit_errors"])
+        )
 
 if __name__ == "__main__":
     unittest.main()
