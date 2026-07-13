@@ -8,7 +8,6 @@ import platform
 import shutil
 import stat
 import subprocess
-import tempfile
 from typing import Final
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -49,11 +48,9 @@ def load_lock() -> dict:  # noqa: DICT_OK
 
 def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
-    selected = (
-        Path(configured).expanduser()
-        if configured
-        else Path(tempfile.gettempdir()) / "office-os-plugin-data"
-    )
+    if not configured:
+        raise OfficeCLIManagerError("OfficeCLI requires the hook-injected PLUGIN_DATA value.")
+    selected = Path(configured).expanduser()
     return Path(os.path.abspath(os.fspath(selected)))
 
 
@@ -116,12 +113,24 @@ def is_linklike(path: Path) -> bool:
     return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
 
 
+def validate_no_linked_ancestors(path: Path) -> None:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    cursor = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        cursor /= component
+        if not os.path.lexists(cursor):
+            break
+        if is_linklike(cursor):
+            raise OfficeCLIManagerError("Managed OfficeCLI runtime path is linked or invalid.")
+
+
 def validate_runtime_ancestors(
     data_root: Path | None = None,
     version: str | None = None,
 ) -> Path:
     root = managed_runtime_root(data_root)
     data = root.parents[1]
+    validate_no_linked_ancestors(data)
     components = [data, data / "runtimes", root]
     if version is not None:
         components.append(root / version)
@@ -163,6 +172,8 @@ def assert_ordinary_binary(binary: Path) -> None:
         raise OfficeCLIManagerError("Managed OfficeCLI binary is missing.") from None
     if not stat.S_ISREG(mode):
         raise OfficeCLIManagerError("Managed OfficeCLI binary must be an ordinary file.")
+    if binary.lstat().st_nlink > 1:
+        raise OfficeCLIManagerError("Managed OfficeCLI binary must not be hard linked.")
 
 
 def sha256_file(path: Path) -> str:
@@ -264,6 +275,8 @@ def install_runtime(accept_download: bool) -> dict:  # noqa: DICT_OK
     finally:
         temporary.unlink(missing_ok=True)
     installed = runtime_status(lock)
+    if installed.get("installed") is not True or installed.get("integrity") != "verified":
+        raise OfficeCLIManagerError("Installed OfficeCLI runtime did not pass post-install verification.")
     prune_old_versions(str(lock["version"]))
     return {**installed, "status": "installed", "downloaded": True, "version_output": version_output, "license": lock["license"]}
 

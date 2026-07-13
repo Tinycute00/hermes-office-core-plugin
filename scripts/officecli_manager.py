@@ -4,13 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 from officecli_runtime import OfficeCLIManagerError
-from officecli_runtime import current_asset_key
 from officecli_runtime import install_runtime
-from officecli_runtime import load_lock
-from officecli_runtime import managed_binary_path
-from officecli_runtime import prune_old_versions
 from officecli_runtime import runtime_status
-from officecli_runtime import side_effect_free_environment
 from officecli_runtime import uninstall_runtime
 
 type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
