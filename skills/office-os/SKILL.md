@@ -1,11 +1,15 @@
 ---
 name: office-os
-description: "無本機 Office 來源：最終唯一回覆首行意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[快速/加強/完整]；第四欄只能是「檢查」，不可寫品質或驗證；後面最多一題來源問題；之前不可使用工具、讀檔或 reference。用於 Excel (.xlsx)、Word (.docx)、PowerPoint (.pptx)、PDF，以及查找、分析、檢查、建立、更新、整合、排程等辦公任務。"
+description: "無本機 Office 來源（即使明示 $office-os）：不可啟動此 skill、讀檔、工具或前言；只能一次最終回覆首行意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[快速/加強/完整]；第四欄只能是「檢查」，不可寫品質或驗證；後面最多一題來源問題。用於 Excel (.xlsx)、Word (.docx)、PowerPoint (.pptx)、PDF，以及查找、分析、檢查、建立、更新、整合、排程等辦公任務。"
 ---
 
 # Office OS
 
 Turn an ordinary office request into a bounded, inspectable workflow. Keep the user-facing interaction nontechnical and fast.
+
+## 0. Source-less hard stop
+
+If the current prompt does not name a local source path or folder, including when it explicitly names $office-os, do not invoke this workflow, read this file or a reference, make a tool call, or emit a preamble. The only permitted output is one final assistant message whose first line is the intent envelope and whose optional second line is one short source question. This hard stop overrides an explicit $office-os mention until the user provides a source.
 
 ## 1. Classify the current turn
 
@@ -22,7 +26,7 @@ Choose one value per dimension:
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
-For a prompt without a named local source path or folder, that final reply takes priority over all workflow activity: do not invoke this skill, make a tool call, read a file or reference, emit progress, plan, or announce a skill beforehand. Use the envelope as the first line and ask at most one short source question. Only after that reply, and once the user names a source, invoke this workflow and read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
+For a prompt without a named local source path or folder, the source-less hard stop takes priority over all workflow activity. Use the envelope as the first line and ask at most one short source question. Only after that reply, and once the user names a source, invoke this workflow and read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 

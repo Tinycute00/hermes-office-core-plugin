@@ -126,8 +126,8 @@ class HookCase(unittest.TestCase):
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
         missing_source_rule = (
-            "If the prompt does not name a local source path or folder, reply first "
-            "with exactly one final assistant message"
+            "SOURCELESS HARD STOP: if the prompt does not name a local source path or folder, "
+            "even when it explicitly names $office-os, do not invoke $office-os"
         )
         deferred_work = (
             "After that reply and once the user names a source, invoke $office-os and read"
@@ -138,6 +138,7 @@ class HookCase(unittest.TestCase):
         self.assertIn("first line must be the intent envelope", context)
         self.assertIn("Chinese intent envelope", context)
         self.assertIn("at most one short source question", context)
+        self.assertIn("The hard stop overrides an explicit $office-os mention", context)
         self.assertIn("Do not make a tool call, read a file or reference", context)
         self.assertIn(deferred_work, context)
         self.assertLess(context.index(missing_source_rule), context.index(deferred_work))

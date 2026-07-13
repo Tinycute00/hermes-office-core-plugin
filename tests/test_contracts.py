@@ -84,7 +84,7 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "無本機 Office 來源：最終唯一回覆首行"
+                "無本機 Office 來源（即使明示 $office-os）：不可啟動此 skill、讀檔、工具或前言；只能一次最終回覆首行"
             ),
             description,
         )
@@ -95,7 +95,7 @@ class ContractCase(unittest.TestCase):
         self.assertIn("第四欄只能是「檢查」", description)
         self.assertIn("不可寫品質或驗證", description)
         self.assertIn("最多一題來源問題", description)
-        self.assertIn("不可使用工具、讀檔或 reference", description)
+        self.assertIn("不可啟動此 skill、讀檔、工具或前言", description)
 
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
         source = (ROOT / "skills" / "office-os" / "SKILL.md").read_bytes()
