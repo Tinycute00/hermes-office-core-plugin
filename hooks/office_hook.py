@@ -15,10 +15,17 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
-import tempfile
 import time
 from typing import Any, Iterator
+
+
+STATE_SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "office-os" / "scripts"
+if os.fspath(STATE_SCRIPTS) not in sys.path:
+    sys.path.insert(0, os.fspath(STATE_SCRIPTS))
+from office_state import StateLeafError, open_private_state_leaf
+from office_state import unlink_private_state_leaf, validate_private_state_leaf
 
 
 def configure_stdio() -> None:
@@ -93,6 +100,40 @@ MAX_DEDUP_KEYS = 128
 MAX_CONTINUATIONS = 2
 
 
+class HookStateError(RuntimeError):
+    pass
+
+
+def validate_state_leaf(path: Path, description: str) -> os.stat_result | None:
+    try:
+        return validate_private_state_leaf(path, description)
+    except StateLeafError as error:
+        raise HookStateError(str(error)) from error
+
+
+def open_state_leaf(
+    path: Path,
+    flags: int,
+    description: str,
+    *,
+    create: bool = False,
+    exclusive: bool = False,
+) -> int:
+    try:
+        return open_private_state_leaf(
+            path, flags, description, create=create, exclusive=exclusive
+        )
+    except StateLeafError as error:
+        raise HookStateError(str(error)) from error
+
+
+def unlink_state_leaf(path: Path, description: str, *, missing_ok: bool = False) -> None:
+    try:
+        unlink_private_state_leaf(path, description, missing_ok=missing_ok)
+    except StateLeafError as error:
+        raise HookStateError(str(error)) from error
+
+
 def read_input() -> dict[str, Any]:
     try:
         raw = sys.stdin.read()
@@ -114,22 +155,63 @@ def canonical_workspace(cwd: str | None) -> str:
 
 def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
-    if configured:
-        return Path(configured)
-    return Path(tempfile.gettempdir()) / "office-os-plugin-data"
+    if not configured:
+        raise HookStateError("Office OS requires the plugin-owned PLUGIN_DATA value.")
+    return Path(os.path.abspath(configured))
+
+
+def is_linklike(path: Path) -> bool:
+    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+        return True
+    try:
+        attributes = path.lstat().st_file_attributes
+    except (AttributeError, FileNotFoundError, OSError):
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def validate_ordinary_ancestors(path: Path, description: str) -> None:
+    for component in (*reversed(path.parents), path):
+        if not os.path.lexists(component):
+            continue
+        if is_linklike(component) or not stat.S_ISDIR(component.lstat().st_mode):
+            raise HookStateError(f"Office OS {description} is linked or invalid.")
+
+
+def ensure_ordinary_directory(
+    path: Path, description: str, create_parents: bool = False
+) -> Path:
+    validate_ordinary_ancestors(path, description)
+    if not os.path.lexists(path):
+        path.mkdir(parents=create_parents)
+    validate_ordinary_ancestors(path, description)
+    return path
+
+
+def ensure_plugin_data_root() -> Path:
+    return ensure_ordinary_directory(
+        plugin_data_root(), "plugin data root", create_parents=True
+    )
 
 
 def workspace_dir(cwd: str | None) -> Path:
     canonical = canonical_workspace(cwd)
     workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
-    path = plugin_data_root() / "workspaces" / workspace_id
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    workspaces = ensure_ordinary_directory(
+        ensure_plugin_data_root() / "workspaces", "workspace state root"
+    )
+    return ensure_ordinary_directory(
+        workspaces / workspace_id, "workspace state directory"
+    )
 
 
 def read_json(path: Path, default: Any) -> Any:
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        descriptor = open_state_leaf(path, os.O_RDONLY, "Office OS hook state")
+    except FileNotFoundError:
+        return default
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, json.JSONDecodeError):
         return default
@@ -138,20 +220,37 @@ def read_json(path: Path, default: Any) -> Any:
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".office-os-{path.name}.{os.getpid()}.tmp")
-    with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temp_path, path)
+    validate_state_leaf(path, "Office OS hook state")
+    descriptor = open_state_leaf(
+        temp_path,
+        os.O_WRONLY,
+        "Office OS hook temporary",
+        create=True,
+        exclusive=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        validate_state_leaf(temp_path, "Office OS hook temporary")
+        validate_state_leaf(path, "Office OS hook state")
+        os.replace(temp_path, path)
+        validate_state_leaf(path, "Office OS hook state")
+    except (OSError, TypeError, ValueError, HookStateError):
+        if os.path.lexists(temp_path):
+            unlink_state_leaf(temp_path, "Office OS hook temporary")
+        raise
 
 
 def cleanup_stale_temps(directory: Path, max_age_seconds: int = 3600) -> None:
     cutoff = time.time() - max_age_seconds
     for candidate in directory.glob(".office-os-*.tmp"):
         try:
+            validate_state_leaf(candidate, "Office OS hook temporary")
             if candidate.is_file() and candidate.stat().st_mtime <= cutoff:
-                candidate.unlink()
+                unlink_state_leaf(candidate, "Office OS hook temporary")
         except OSError:
             continue
 
@@ -159,27 +258,54 @@ def cleanup_stale_temps(directory: Path, max_age_seconds: int = 3600) -> None:
 @contextlib.contextmanager
 def state_lock(directory: Path) -> Iterator[bool]:
     lock_path = directory / "run-state.lock"
+    descriptor = open_state_leaf(
+        lock_path, os.O_RDWR, "Office OS hook lock", create=True
+    )
     acquired = False
     try:
-        try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(descriptor, f"{os.getpid()} {time.time()}".encode("ascii"))
-            os.close(descriptor)
-            acquired = True
-        except FileExistsError:
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        deadline = time.monotonic() + 0.25
+        while not acquired:
             try:
-                if time.time() - lock_path.stat().st_mtime > 120:
-                    lock_path.unlink(missing_ok=True)
-                    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    os.write(descriptor, f"{os.getpid()} {time.time()}".encode("ascii"))
-                    os.close(descriptor)
-                    acquired = True
-            except (OSError, FileExistsError):
-                acquired = False
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.025)
+        if acquired:
+            owner = json.dumps(
+                {"pid": os.getpid(), "timestamp": time.time()},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.write(descriptor, owner)
+            os.ftruncate(descriptor, len(owner))
+            os.fsync(descriptor)
         yield acquired
     finally:
         if acquired:
-            lock_path.unlink(missing_ok=True)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def strip_code(prompt: str) -> str:
@@ -256,6 +382,15 @@ def context_output(event: str, context: str) -> dict[str, Any]:
     }
 
 
+def plugin_data_context(directory: Path) -> str:
+    data_root = directory.parents[1]
+    return (
+        f" Authoritative Office OS PLUGIN_DATA is {os.fspath(data_root)}. "
+        "Set PLUGIN_DATA to exactly this path for every office_os.py command; "
+        "do not use or invent another data root."
+    )
+
+
 def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
     cleanup_stale_temps(directory)
     state = read_json(directory / "run_state.json", {})
@@ -268,6 +403,7 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
         "Office OS is available as $office-os for local Excel, Word, "
         "PowerPoint, PDF, and cross-file work. Reclassify the current turn; "
         "the first visible Office response line must be the Chinese intent envelope."
+        + plugin_data_context(directory)
     )
     if active:
         context += (
@@ -302,6 +438,7 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         "Classify this turn only; prior edit or schedule permission does not carry over. "
         f"Read {skill_path} and the relevant references "
         f"{', '.join(os.fspath(reference) for reference in references)}."
+        + plugin_data_context(directory)
     )
     emit(context_output("UserPromptSubmit", context))
 
@@ -356,15 +493,19 @@ def handle_stop(payload: dict[str, Any], directory: Path) -> None:
 def main() -> int:
     payload = read_input()
     event = str(payload.get("hook_event_name") or "")
-    directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
-    if event == "SessionStart":
-        handle_session_start(payload, directory)
-    elif event == "UserPromptSubmit":
-        handle_user_prompt(payload, directory)
-    elif event == "Stop":
-        handle_stop(payload, directory)
-    elif event:
-        emit({})
+    try:
+        directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
+        if event == "SessionStart":
+            handle_session_start(payload, directory)
+        elif event == "UserPromptSubmit":
+            handle_user_prompt(payload, directory)
+        elif event == "Stop":
+            handle_stop(payload, directory)
+        elif event:
+            emit({})
+    except HookStateError as error:
+        sys.stderr.write(f"Office OS hook refused unsafe workspace state: {error}\n")
+        return 1
     return 0
 
 

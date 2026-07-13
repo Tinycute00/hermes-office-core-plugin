@@ -1,3 +1,4 @@
+# noqa: SIZE_OK - behavioral hook coverage shares one process-level fixture surface.
 from __future__ import annotations
 
 import hashlib
@@ -23,7 +24,7 @@ class HookCase(unittest.TestCase):
         self.workspace.mkdir()
         self.plugin_data = self.base / "plugin-data"
 
-    def run_hook(self, payload: dict) -> dict | None:
+    def run_hook(self, payload: dict, expected_returncode: int = 0) -> dict | None:
         environment = os.environ.copy()
         environment["PLUGIN_DATA"] = os.fspath(self.plugin_data)
         environment["PLUGIN_ROOT"] = os.fspath(ROOT)
@@ -39,10 +40,43 @@ class HookCase(unittest.TestCase):
         )
         self.assertEqual(
             completed.returncode,
-            0,
+            expected_returncode,
             msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
         )
         return json.loads(completed.stdout) if completed.stdout.strip() else None
+
+    def create_directory_link(self, link: Path, target: Path) -> None:
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            link.symlink_to(target, target_is_directory=True)
+        self.addCleanup(self.remove_directory_link, link)
+
+    def remove_directory_link(self, link: Path) -> None:
+        if not os.path.lexists(link):
+            return
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            link.unlink()
+
+    def assert_state_link_rejected(self, turn: str, outside: Path) -> None:
+        result = self.run_hook(
+            self.prompt_payload("review report.xlsx", turn),
+            expected_returncode=1,
+        )
+        self.assertIsNone(result)
+        self.assertEqual({path.name for path in outside.iterdir()}, {"sentinel.txt"})
+        self.assertEqual(
+            (outside / "sentinel.txt").read_text(encoding="utf-8"),
+            "outside",
+        )
 
     def workspace_data(self) -> Path:
         canonical = os.path.normcase(os.path.realpath(os.path.abspath(self.workspace)))
@@ -69,6 +103,8 @@ class HookCase(unittest.TestCase):
         self.assertIn("$office-os", context)
         self.assertIn("Excel.md", context)
         self.assertIn("意圖：<值>", context)
+        self.assertIn("PLUGIN_DATA", context)
+        self.assertIn(os.fspath(self.plugin_data), context)
         self.assertIsNone(self.run_hook(payload))
 
     def test_single_object_schedule_routes_office_and_object_references(self) -> None:
@@ -125,6 +161,8 @@ class HookCase(unittest.TestCase):
         context = result["hookSpecificOutput"]["additionalContext"]
         self.assertIn("run-1", context)
         self.assertIn("remaining_units=4", context)
+        self.assertIn("PLUGIN_DATA", context)
+        self.assertIn(os.fspath(self.plugin_data), context)
 
     def test_stop_continuation_requires_new_progress_and_is_capped_at_two(self) -> None:
         state_path = self.workspace_data() / "run_state.json"
@@ -138,6 +176,10 @@ class HookCase(unittest.TestCase):
             "continuation_count": 0,
         }
         state_path.write_text(json.dumps(state), encoding="utf-8")
+        (self.workspace_data() / "run-state.lock").write_text(
+            json.dumps({"pid": 0, "token": "released-core-lock"}),
+            encoding="ascii",
+        )
         payload = {
             "hook_event_name": "Stop",
             "session_id": "session-1",
@@ -177,6 +219,103 @@ class HookCase(unittest.TestCase):
             (self.workspace_data() / "hook_dedup.json").read_text(encoding="utf-8")
         )
         self.assertEqual(len(data["keys"]), 128)
+
+    def test_hook_rejects_linked_plugin_data_before_state_write(self) -> None:
+        outside = self.base / "outside-plugin-data"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        self.create_directory_link(self.plugin_data, outside)
+
+        self.assert_state_link_rejected("turn-linked-plugin-data", outside)
+
+    def test_hook_rejects_linked_workspaces_root_before_state_write(self) -> None:
+        self.plugin_data.mkdir()
+        outside = self.base / "outside-workspaces"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        self.create_directory_link(self.plugin_data / "workspaces", outside)
+
+        self.assert_state_link_rejected("turn-linked-workspaces", outside)
+
+    def test_hook_rejects_linked_workspace_id_before_state_write(self) -> None:
+        workspaces = self.plugin_data / "workspaces"
+        workspaces.mkdir(parents=True)
+        canonical = os.path.normcase(os.path.realpath(os.path.abspath(self.workspace)))
+        identifier = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+        outside = self.base / "outside-workspace-id"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        self.create_directory_link(workspaces / identifier, outside)
+
+        self.assert_state_link_rejected("turn-linked-workspace-id", outside)
+
+    def test_hook_rejects_linked_plugin_data_ancestor_before_state_write(self) -> None:
+        outside = self.base / "outside-ancestor"
+        plugin_data = outside / "plugin-data"
+        plugin_data.mkdir(parents=True)
+        (plugin_data / "sentinel.txt").write_text("outside", encoding="utf-8")
+        linked_parent = self.base / "linked-parent"
+        self.create_directory_link(linked_parent, outside)
+        self.plugin_data = linked_parent / "plugin-data"
+
+        self.assert_state_link_rejected("turn-linked-ancestor", plugin_data)
+
+    def test_hook_rejects_hardlinked_dedup_before_write(self) -> None:
+        directory = self.workspace_data()
+        sentinel = self.base / "outside-dedup.json"
+        sentinel.write_text("outside dedup", encoding="utf-8")
+        os.link(sentinel, directory / "hook_dedup.json")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+
+        self.assertIsNone(
+            self.run_hook(self.prompt_payload("review report.xlsx", "turn-hardlink-dedup"), 1)
+        )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_hook_rejects_hardlinked_lock_before_write(self) -> None:
+        directory = self.workspace_data()
+        (directory / "run_state.json").write_text(
+            json.dumps(
+                {
+                    "status": "executing",
+                    "remaining_units": 1,
+                    "waiting_for_user": False,
+                    "progress_marker": "chunk-1",
+                }
+            ),
+            encoding="utf-8",
+        )
+        sentinel = self.base / "outside-lock.json"
+        sentinel.write_text("outside lock", encoding="utf-8")
+        os.link(sentinel, directory / "run-state.lock")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-hardlink-lock",
+            "cwd": os.fspath(self.workspace),
+        }
+
+        self.assertIsNone(self.run_hook(payload, 1))
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_hook_rejects_hardlinked_run_state_before_read(self) -> None:
+        directory = self.workspace_data()
+        sentinel = self.base / "outside-run-state.json"
+        sentinel.write_text('{"status":"executing","remaining_units":1}', encoding="utf-8")
+        os.link(sentinel, directory / "run_state.json")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "session-1",
+            "cwd": os.fspath(self.workspace),
+        }
+
+        self.assertIsNone(self.run_hook(payload, 1))
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
 
 
 if __name__ == "__main__":
