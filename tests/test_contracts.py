@@ -92,6 +92,10 @@ class ContractCase(unittest.TestCase):
         self.assertIn("最多一題來源問題", description)
         self.assertIn("不可使用工具、讀檔或 reference", description)
 
+    def test_skill_source_uses_utf8_bom_for_windows_default_read(self) -> None:
+        source = (ROOT / "skills" / "office-os" / "SKILL.md").read_bytes()
+        self.assertTrue(source.startswith(b"\xef\xbb\xbf"), source[:3].hex())
+
     def test_office_workflow_policy_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
             encoding="utf-8"

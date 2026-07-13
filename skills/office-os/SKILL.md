@@ -1,4 +1,4 @@
----
+﻿---
 name: office-os
 description: "未提供本機 Office 來源時：最終唯一回覆第一行必為意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[值]；後面最多一題來源問題；之前不可使用工具、讀檔或 reference。用於 Excel (.xlsx)、Word (.docx)、PowerPoint (.pptx)、PDF，以及查找、分析、檢查、建立、更新、整合、排程等辦公任務。"
 ---
