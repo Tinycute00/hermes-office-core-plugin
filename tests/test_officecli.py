@@ -408,6 +408,73 @@ class OfficeCLICase(unittest.TestCase):
             self.assertFalse(allowed["result"].get("isError", False))
             self.assertEqual(json.loads(allowed_capture.read_text(encoding="utf-8"))["argv"][0], "set")
 
+    def test_mutations_reject_file_properties_from_another_core_run(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            # Given: two confirmed Core runs own separate ordinary candidates.
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            target_run_id = "a" * 32
+            private_run_id = "b" * 32
+            target_run = candidate_root / target_run_id
+            private_run = candidate_root / private_run_id
+            target_run.mkdir(parents=True)
+            private_run.mkdir()
+            target = target_run / "candidate.xlsx"
+            private_image = private_run / "private.png"
+            target.write_bytes(b"candidate")
+            private_image.write_bytes(b"private")
+            for workspace, run_id, directory in (
+                ("target", target_run_id, target_run),
+                ("private", private_run_id, private_run),
+            ):
+                state_directory = data_root / "workspaces" / workspace
+                state_directory.mkdir(parents=True)
+                (state_directory / "run_state.json").write_text(
+                    json.dumps(
+                        {
+                            "run_id": run_id,
+                            "candidate_directory": os.fspath(directory),
+                            "proposal_confirmed": True,
+                            "status": "executing",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            # When: the target run asks OfficeCLI to read an image from the other run.
+            messages = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "officecli",
+                        "arguments": {
+                            "command": [
+                                "add",
+                                os.fspath(target),
+                                "/Sheet1",
+                                "--type",
+                                "image",
+                                "--prop",
+                                f"src={private_image}",
+                            ]
+                        },
+                    },
+                },
+            ]
+            payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
+            capture = base / "cross-run-child.json"
+            completed = run_adapter(payload, data_root, base, capture)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            response = json.loads(completed.stdout.splitlines()[-1])
+
+            # Then: policy denies the request before the child executor is reached.
+            self.assertTrue(response["result"].get("isError", False), response)
+            self.assertFalse(capture.exists())
+
     def test_mutation_authorizer_fails_closed_for_stale_and_invalid_state_inventory(self) -> None:
         def fixture() -> tuple[Path, Path, Path, str]:
             temporary = tempfile.TemporaryDirectory(dir=ROOT)

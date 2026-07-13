@@ -130,7 +130,10 @@ function assertMatchingState(state, run) {
   }
 }
 
-function authorizeMutation(candidate) {
+function authorizeMutation(candidate, fileCandidates = []) {
+  if (!Array.isArray(fileCandidates) || !fileCandidates.every((value) => typeof value === "string")) {
+    throw new CoreRunAuthorityError("File-bearing mutation properties are invalid.");
+  }
   const run = directRunDirectory(candidate);
   const workspaces = path.join(run.dataRoot, "workspaces");
   if (linkedAncestor(workspaces)) {
@@ -163,6 +166,12 @@ function authorizeMutation(candidate) {
     );
   }
   assertMatchingState(matches[0], run);
+  for (const fileCandidate of fileCandidates) {
+    const fileRun = directRunDirectory(fileCandidate);
+    if (!samePath(fileRun.runDirectory, run.runDirectory)) {
+      throw new CoreRunAuthorityError("File-bearing property must stay in the authorized Core candidate run directory.");
+    }
+  }
   return run;
 }
 

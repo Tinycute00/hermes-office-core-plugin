@@ -141,7 +141,7 @@ function start(dependencies = {}) {
       if (!validArgumentShape(argumentsValue)) throw new InvalidParamsError("command must be an array of 1-128 strings");
       try {
         const parsed = parseToolArguments(argumentsValue);
-        const authority = MUTABLE_COMMANDS.has(parsed.argv[0]) ? authorizeMutation(parsed.argv[1]) : null;
+        const authority = MUTABLE_COMMANDS.has(parsed.argv[0]) ? authorizeMutation(parsed.argv[1], parsed.fileCandidates) : null;
         const binary = verifyRuntime();
         return await execute(binary, parsed, {
           ...(authority ? { authority } : {}),

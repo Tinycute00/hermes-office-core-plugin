@@ -102,6 +102,20 @@ function property(value, bare = false) {
   return value;
 }
 
+function filePropertyCandidates(argv) {
+  const candidates = [];
+  for (let index = 0; index < argv.length - 1; index += 1) {
+    if (argv[index] !== "--prop") continue;
+    const value = argv[index + 1];
+    const separator = value.indexOf("=");
+    if (separator <= 0) continue;
+    if (FILE_PROPERTIES.has(value.slice(0, separator).toLowerCase())) {
+      candidates.push(value.slice(separator + 1));
+    }
+  }
+  return candidates;
+}
+
 function validateCommon(command) {
   if (
     !Array.isArray(command) ||
@@ -212,7 +226,7 @@ function parseToolArguments(argumentsValue) {
     selector(argv[2]); selector(argv[3]);
   }
   if (json) argv.push("--json");
-  return { argv, screenshot };
+  return { argv, fileCandidates: filePropertyCandidates(argv), screenshot };
 }
 
 module.exports = { PolicyError, TOOL, parseToolArguments };
