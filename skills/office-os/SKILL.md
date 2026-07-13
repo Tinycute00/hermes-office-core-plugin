@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "Source-free Office intake: first visible line is the exact hook-supplied intent envelope plus office-os rationale; SKILL.md is ASCII-only and loaded once; final reply repeats the envelope (intent envelope, then source-path question). No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
+description: "Source-free Office intake: first visible message classifies the request and explains the office-os choice; SKILL.md is ASCII-only and loaded once; Stop validates the exact final envelope once (intent envelope, then source-path question). No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
 ---
 
 # Office OS
@@ -9,11 +9,11 @@ Turn an ordinary office request into a bounded, inspectable workflow. Keep the u
 
 ## 0. Source-free intake
 
-When source-free hook context is present, the first user-visible text line must equal the supplied skill-use announcement verbatim from <required-first-user-visible-line>, before any tool call or skill load. The supplied line already states which skill is being used and why. Emit no other preamble, plan, progress, or tool-activity message.
+When source-free hook context is present, the first user-visible message must be one compact classification-and-skill-rationale sentence before any tool call or skill load. It must classify the Office workflow, state the read-only boundary, and name `$office-os` with why it applies. Emit no other preamble, plan, progress, or tool-activity message.
 
 SKILL.md is ASCII-only and should be loaded exactly once with the host's normal text reader; do not reload it. When reading any Markdown reference on Windows PowerShell, use explicit UTF-8 (Get-Content -Raw -Encoding UTF8).
 
-If the current prompt does not name a local source path or folder, copy the two lines inside the hook context's <required-final-reply> block verbatim as exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Do not reconstruct or paraphrase those lines from this file. The only permitted earlier user-visible text is the exact one-line skill-use announcement required above; do not emit any other preamble, plan, skill announcement, tool-activity summary, or progress message. Do not inspect or alter Office data, call office_os.py, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit $office-os invocation can load this skill, but do not load a workflow reference until the user provides a source.
+If the current prompt does not name a local source path or folder, copy the two lines inside the hook context's <required-final-reply> block verbatim as exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Do not reconstruct or paraphrase those lines from this file. The only permitted earlier user-visible text is the one compact classification-and-skill-rationale sentence required above; do not emit any other preamble, plan, skill announcement, tool-activity summary, or progress message. The Stop hook validates the exact two-line reply and can request one bounded correction; obey that correction without loading the skill again. Do not inspect or alter Office data, call office_os.py, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit $office-os invocation can load this skill, but do not load a workflow reference until the user provides a source.
 
 ## 1. Classify the current turn
 

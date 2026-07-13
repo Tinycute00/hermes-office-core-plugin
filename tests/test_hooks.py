@@ -145,14 +145,14 @@ class HookCase(unittest.TestCase):
         )
         self.assertIn("<required-final-reply>", context)
         self.assertIn("</required-final-reply>", context)
-        self.assertIn("<required-first-user-visible-line>", context)
-        self.assertIn("</required-first-user-visible-line>", context)
+        self.assertIn("<required-first-user-visible-contract>", context)
+        self.assertIn("</required-first-user-visible-contract>", context)
         self.assertIn(
-            "The first user-visible text line MUST equal the supplied line verbatim",
+            "The first user-visible message MUST be one compact classification-and-skill-rationale sentence",
             context,
         )
         self.assertIn(
-            "The supplied line is the complete required skill-use announcement and already states which skill is being used and why",
+            "classify the Office workflow, state the read-only boundary, and name $office-os with why it applies",
             context,
         )
         self.assertIn(
@@ -168,9 +168,11 @@ class HookCase(unittest.TestCase):
             context,
         )
         self.assertIn(
-            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速；使用 $office-os，因為這是 Office 工作流程。",
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速",
             context,
         )
+        self.assertIn("The Stop hook validates this exact final reply once", context)
+        self.assertNotIn("MUST equal the supplied line verbatim", context)
         self.assertNotIn("Prefer this canonical envelope", context)
         self.assertIn("Do not inspect or alter Office data", context)
         self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
@@ -343,6 +345,50 @@ class HookCase(unittest.TestCase):
         self.assertEqual(capped, {})
         final = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(final["continuation_count"], 2)
+
+    def test_source_free_stop_retries_noncanonical_final_once_without_state(self) -> None:
+        malformed = (
+            "意圖：每週更新 Excel 報表；目前不修改檔案。\n"
+            "Excel 來源檔或資料夾路徑是什麼？"
+        )
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-source-free",
+            "turn_id": "turn-source-free",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": malformed,
+        }
+
+        correction = self.run_hook(payload)
+
+        self.assertEqual(correction["decision"], "block")
+        self.assertIn(
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
+            "Excel 來源檔或資料夾路徑是什麼？",
+            correction["reason"],
+        )
+        self.assertFalse(self.plugin_data.exists())
+
+        payload["stop_hook_active"] = True
+        self.assertEqual(self.run_hook(payload), {})
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_source_free_stop_accepts_canonical_final_without_state(self) -> None:
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-source-free",
+            "turn_id": "turn-source-free",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": (
+                "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
+                "Excel 來源檔或資料夾路徑是什麼？"
+            ),
+        }
+
+        self.assertEqual(self.run_hook(payload), {})
+        self.assertFalse(self.plugin_data.exists())
 
     def test_prompt_dedup_is_bounded(self) -> None:
         for number in range(140):

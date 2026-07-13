@@ -84,12 +84,12 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "Source-free Office intake: first visible line is the exact hook-supplied intent envelope plus office-os rationale"
+                "Source-free Office intake: first visible message classifies the request and explains the office-os choice"
             ),
             description,
         )
         self.assertIn("SKILL.md is ASCII-only and loaded once", description)
-        self.assertIn("final reply repeats the envelope", description)
+        self.assertIn("Stop validates the exact final envelope once", description)
         self.assertIn("intent envelope, then source-path question", description)
         self.assertNotIn("Prefer", description)
         self.assertIn("No Office data work before source", description)
@@ -158,23 +158,24 @@ class ContractCase(unittest.TestCase):
                 text,
             )
             self.assertIn("<required-final-reply>", text)
-            self.assertIn("<required-first-user-visible-line>", text)
             self.assertIn(
-                "first user-visible text line must equal the supplied skill-use announcement verbatim",
+                "first user-visible message must be one compact classification-and-skill-rationale sentence",
                 text.lower(),
             )
             self.assertIn(
-                "The supplied line already states which skill is being used and why",
+                "classify the Office workflow, state the read-only boundary, and name `$office-os` with why it applies",
                 text,
             )
             self.assertIn("copy", text.lower())
             self.assertIn("verbatim", text)
+            self.assertIn("Stop hook", text)
             self.assertIn("Get-Content -Raw -Encoding UTF8", text)
             self.assertIn(
                 "SKILL.md is ASCII-only and should be loaded exactly once",
                 text,
             )
             self.assertNotIn("Prefer the canonical envelope", text)
+            self.assertNotIn("must equal the supplied skill-use announcement verbatim", text.lower())
 
     def test_readme_describes_source_free_intake_as_classification_first(self) -> None:
         text = (ROOT / "README.md").read_text(encoding="utf-8")

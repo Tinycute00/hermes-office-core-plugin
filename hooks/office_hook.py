@@ -117,6 +117,16 @@ QUOTED_LOCAL_PATH_PATTERN = re.compile(
 ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
 MAX_DEDUP_KEYS = 128
 MAX_CONTINUATIONS = 2
+CANONICAL_SOURCE_FREE_REPLY_PATTERN = re.compile(
+    r"\A意圖：(查找|分析|檢查|建立|更新|整合|排程)｜"
+    r"物件：(Excel|Word|PowerPoint|PDF|跨檔案)｜權限：唯讀｜"
+    r"檢查：(快速|加強|完整)\n"
+    r"(Excel|Word|PowerPoint|PDF|跨檔案) 來源檔或資料夾路徑是什麼？\Z"
+)
+SOURCE_REQUEST_PATTERN = re.compile(
+    r"(?:來源|檔案|資料夾|路徑|位置|哪(?:一個|個|裡)|什麼).*?[?？]\s*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class HookStateError(RuntimeError):
@@ -416,17 +426,15 @@ def source_free_intake_context(prompt: str) -> str:
         f"意圖：{source_free_intent(prompt)}｜物件：{object_name}｜權限：唯讀｜"
         f"檢查：{source_free_check(prompt)}"
     )
-    announcement = f"{envelope}；使用 $office-os，因為這是 Office 工作流程。"
     question = f"{object_name} 來源檔或資料夾路徑是什麼？"
     return (
         "<office-os-source-free-intake>\n"
-        "<required-first-user-visible-line>\n"
-        f"{announcement}\n"
-        "</required-first-user-visible-line>\n"
-        "The first user-visible text line MUST equal the supplied line verbatim, before any "
-        "tool call or skill load. The supplied line is the complete required skill-use "
-        "announcement and already states which skill is being used and why. Emit no other preamble, plan, progress, or "
-        "tool-activity message.\n"
+        "<required-first-user-visible-contract>\n"
+        "The first user-visible message MUST be one compact classification-and-skill-rationale sentence, "
+        "before any tool call or skill load. It must classify the Office workflow, state the read-only "
+        "boundary, and name $office-os with why it applies.\n"
+        "</required-first-user-visible-contract>\n"
+        "Emit no other preamble, plan, progress, or tool-activity message.\n"
         "FINAL USER-VISIBLE REPLY MUST BE EXACTLY TWO NON-EMPTY LINES. "
         "THE FOLLOWING BLOCK IS AUTHORITATIVE:\n"
         "<required-final-reply>\n"
@@ -434,6 +442,8 @@ def source_free_intake_context(prompt: str) -> str:
         "</required-final-reply>\n"
         "Copy the two lines inside <required-final-reply> verbatim as the entire final reply; "
         "do not reconstruct or paraphrase them from skill text.\n"
+        "The Stop hook validates this exact final reply once and requests one bounded correction "
+        "when a source-question reply is paraphrased.\n"
         "SKILL.md is ASCII-only and should be loaded exactly once with the host's normal text reader; "
         "do not reload it. After a source is named, read Markdown references with explicit UTF-8 on Windows PowerShell "
         "(Get-Content -Raw -Encoding UTF8).\n\n"
@@ -443,6 +453,41 @@ def source_free_intake_context(prompt: str) -> str:
         "or inspect Office data until the source is named. The final reply must remain the supplied two-line envelope after any allowed skill load.\n"
         "</office-os-source-free-intake>"
     )
+
+
+def normalized_message(message: str) -> str:
+    return message.strip().replace("\r\n", "\n").replace("\r", "\n")
+
+
+def canonical_source_free_reply(message: str) -> bool:
+    normalized = normalized_message(message)
+    match = CANONICAL_SOURCE_FREE_REPLY_PATTERN.fullmatch(normalized)
+    return bool(match and match.group(2) == match.group(4))
+
+
+def source_free_stop_correction(payload: dict[str, Any]) -> dict[str, str] | None:
+    message = str(payload.get("last_assistant_message") or "")
+    normalized = normalized_message(message)
+    if not normalized or canonical_source_free_reply(normalized):
+        return None
+    if bool(payload.get("stop_hook_active")):
+        return None
+    if not SOURCE_REQUEST_PATTERN.search(normalized) or not object_hints(normalized):
+        return None
+    object_name = source_free_object(normalized)
+    expected = (
+        f"意圖：{source_free_intent(normalized)}｜物件：{object_name}｜權限：唯讀｜"
+        f"檢查：{source_free_check(normalized)}\n"
+        f"{object_name} 來源檔或資料夾路徑是什麼？"
+    )
+    return {
+        "decision": "block",
+        "reason": (
+            "The source-free Office intake final reply was not canonical. "
+            "Return exactly these two lines and nothing else:\n"
+            f"{expected}"
+        ),
+    }
 
 
 def prompt_reference(prompt: str) -> tuple[str, ...]:
@@ -566,6 +611,9 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
 
 
 def handle_stop(payload: dict[str, Any], directory: Path) -> None:
+    if not os.path.lexists(directory):
+        emit(source_free_stop_correction(payload) or {})
+        return
     path = directory / "run_state.json"
     with state_lock(directory) as acquired:
         if not acquired:
@@ -576,6 +624,9 @@ def handle_stop(payload: dict[str, Any], directory: Path) -> None:
             emit({})
             return
         status = state.get("status")
+        if status not in ACTIVE_STATUSES:
+            emit(source_free_stop_correction(payload) or {})
+            return
         remaining = int(state.get("remaining_units") or 0)
         waiting = bool(state.get("waiting_for_user", False))
         continuations = int(state.get("continuation_count") or 0)
@@ -624,7 +675,9 @@ def main() -> int:
         elif event == "UserPromptSubmit":
             handle_user_prompt(payload)
         elif event == "Stop":
-            directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
+            directory = workspace_dir(
+                str(payload.get("cwd") or os.getcwd()), create=False
+            )
             handle_stop(payload, directory)
         elif event:
             emit({})
