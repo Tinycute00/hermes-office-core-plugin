@@ -1,7 +1,12 @@
+# noqa: SIZE_OK - Public plugin contracts are intentionally verified together.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 
@@ -233,18 +238,73 @@ class ContractCase(unittest.TestCase):
                     self.assertIn("commandWindows", handler)
                     self.assertLessEqual(handler["timeout"], 10)
 
-    def test_plugin_data_is_hook_owned_without_a_temp_fallback(self) -> None:
-        paths = (
-            ROOT / "hooks" / "office_hook.py",
-            ROOT / "scripts" / "officecli_runtime.py",
-            ROOT / "scripts" / "officecli-mcp.cjs",
-            ROOT / "scripts" / "officecli-mcp" / "paths.cjs",
-            ROOT / "skills" / "office-os" / "scripts" / "office_os.py",
+    def test_hook_refuses_writable_work_without_plugin_data(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("PLUGIN_DATA", None)
+        environment.pop("CLAUDE_PLUGIN_DATA", None)
+
+        completed = subprocess.run(
+            [sys.executable, os.fspath(ROOT / "hooks" / "office_hook.py")],
+            input=json.dumps({"hook_event_name": "SessionStart", "cwd": os.fspath(ROOT)}),
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
         )
-        for path in paths:
-            text = path.read_text(encoding="utf-8")
-            self.assertNotIn("office-os-plugin-data", text, path.name)
-            self.assertIn("PLUGIN_DATA", text, path.name)
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn(
+            "Office OS requires the plugin-owned PLUGIN_DATA value.",
+            completed.stderr,
+        )
+
+    def test_hook_exposes_its_authoritative_plugin_data_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            expected_data_root = data_root.resolve()
+            workspace = base / "workspace"
+            workspace.mkdir()
+            environment = os.environ.copy()
+            environment["PLUGIN_DATA"] = os.fspath(data_root)
+            environment.pop("CLAUDE_PLUGIN_DATA", None)
+
+            completed = subprocess.run(
+                [sys.executable, os.fspath(ROOT / "hooks" / "office_hook.py")],
+                input=json.dumps(
+                    {
+                        "hook_event_name": "SessionStart",
+                        "cwd": os.fspath(workspace),
+                    }
+                ),
+                cwd=workspace,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        context = json.loads(completed.stdout)["hookSpecificOutput"][
+            "additionalContext"
+        ]
+        self.assertIn(
+            f"Authoritative Office OS PLUGIN_DATA is {expected_data_root}.",
+            context,
+        )
+
+    def test_manual_candidate_mutation_requires_core_confirmation(self) -> None:
+        wording = "Manual candidate mutation requires Core confirmation."
+        documents = (
+            ROOT / "skills" / "office-os" / "SKILL.md",
+            ROOT / "skills" / "office-os" / "references" / "Agent.md",
+            ROOT / "skills" / "office-os" / "references" / "OfficeCLI.md",
+        )
+        for document in documents:
+            self.assertIn(wording, document.read_text(encoding="utf-8"), document.name)
 
     def test_old_hermes_package_surface_is_removed(self) -> None:
         self.assertFalse((ROOT / "office_core_plugin").exists())

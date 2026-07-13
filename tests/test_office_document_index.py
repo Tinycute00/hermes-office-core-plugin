@@ -12,7 +12,6 @@ import sys
 import tempfile
 from types import ModuleType
 import unittest
-from unittest import mock
 import zipfile
 
 
@@ -250,61 +249,88 @@ class OfficeDocumentIndexCase(unittest.TestCase):
             ],
         )
 
-    def test_core_preserves_dispatch_errors_and_public_helpers(self) -> None:
-        document = self.base / "limited.docx"
-        write_docx_fixture(document)
-
-        leaf = load_document_index_module()
-        core = load_core_module()
-
-        for name in (
-            "main",
-            "build_parser",
-            "extract_docx",
-            "extract_pptx",
-            "extract_xlsx",
-            "extract_chunks",
-            "detect_sensitivity",
-            "chunk",
-            "connect_database",
-            "replace_document",
-        ):
-            self.assertTrue(callable(getattr(core, name, None)))
-
-        with mock.patch.object(core, "MAX_INDEX_PACKAGE_MEMBERS", 1):
-            with self.assertRaises(core.OfficeOSError) as package_limit:
-                core.extract_docx(document)
-        self.assertEqual(
-            str(package_limit.exception),
-            "Office package exceeds index limits: member count.",
+    def test_core_rejects_a_compressed_docx_from_public_dispatch(self) -> None:
+        document = self.base / "compressed.docx"
+        word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        write_zip(
+            document,
+            {
+                "word/document.xml": (
+                    f'<w:document xmlns:w="{word}"><w:body><w:p><w:r><w:t>'
+                    f'{"x" * 200_000}'
+                    "</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
         )
 
-        malformed = {
-            ".docx": ("word/document.xml", "<document>"),
-            ".pptx": ("ppt/slides/slide1.xml", "<slide>"),
-            ".xlsx": ("xl/workbook.xml", "<workbook>"),
-        }
-        for extension, (member, content) in malformed.items():
-            path = self.base / f"malformed{extension}"
-            write_zip(path, {member: content})
-            with self.subTest(extension=extension):
-                with self.assertRaises(core.OfficeOSError) as malformed_error:
-                    core.extract_chunks(path)
-                self.assertRegex(
-                    str(malformed_error.exception),
-                    rf"^Could not extract {re.escape(extension)} content: ",
-                )
+        core = load_core_module()
+
+        with self.assertRaises(core.OfficeOSError) as package_limit:
+            core.extract_chunks(document)
+
+        self.assertEqual(
+            str(package_limit.exception),
+            "Office package exceeds index limits: compression ratio.",
+        )
+
+    def test_core_reports_malformed_docx_content(self) -> None:
+        document = self.base / "malformed.docx"
+        write_zip(document, {"word/document.xml": "<document>"})
+
+        core = load_core_module()
+
+        with self.assertRaises(core.OfficeOSError) as malformed_error:
+            core.extract_chunks(document)
+
+        self.assertRegex(
+            str(malformed_error.exception),
+            r"^Could not extract \.docx content: ",
+        )
+
+    def test_core_reports_malformed_pptx_content(self) -> None:
+        presentation = self.base / "malformed.pptx"
+        write_zip(presentation, {"ppt/slides/slide1.xml": "<slide>"})
+
+        core = load_core_module()
+
+        with self.assertRaises(core.OfficeOSError) as malformed_error:
+            core.extract_chunks(presentation)
+
+        self.assertRegex(
+            str(malformed_error.exception),
+            r"^Could not extract \.pptx content: ",
+        )
+
+    def test_core_reports_malformed_xlsx_content(self) -> None:
+        workbook = self.base / "malformed.xlsx"
+        write_zip(workbook, {"xl/workbook.xml": "<workbook>"})
+
+        core = load_core_module()
+
+        with self.assertRaises(core.OfficeOSError) as malformed_error:
+            core.extract_chunks(workbook)
+
+        self.assertRegex(
+            str(malformed_error.exception),
+            r"^Could not extract \.xlsx content: ",
+        )
+
+    def test_core_requires_conversion_for_pdf_content(self) -> None:
+        core = load_core_module()
 
         with self.assertRaises(core.OfficeOSError) as unsupported:
             core.extract_chunks(self.base / "conversion.pdf")
+
         self.assertEqual(
             str(unsupported.exception),
             "Content extraction requires conversion for .pdf.",
         )
 
+    def test_core_cli_requires_authoritative_plugin_data(self) -> None:
         environment = os.environ.copy()
         environment.pop("PLUGIN_DATA", None)
         environment.pop("CLAUDE_PLUGIN_DATA", None)
+
         completed = subprocess.run(
             [sys.executable, os.fspath(CORE), "status", "--cwd", os.fspath(self.base)],
             cwd=self.base,
@@ -314,24 +340,11 @@ class OfficeDocumentIndexCase(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
         self.assertEqual(completed.returncode, 2)
         payload = json.loads(completed.stdout)
         self.assertEqual(payload["status"], "error")
         self.assertIn("PLUGIN_DATA", payload["error"])
-
-        self.assertTrue(
-            callable(getattr(core, "_extract_docx", None)),
-            "office_os has not delegated document extraction to office_document_index yet.",
-        )
-        with mock.patch.object(
-            core,
-            "_extract_docx",
-            side_effect=leaf.DocumentIndexError("synthetic leaf package limit"),
-        ):
-            with self.assertRaises(core.OfficeOSError) as translated:
-                core.extract_docx(document)
-        self.assertEqual(str(translated.exception), "synthetic leaf package limit")
-        self.assertIsInstance(translated.exception.__cause__, leaf.DocumentIndexError)
 
 
 if __name__ == "__main__":

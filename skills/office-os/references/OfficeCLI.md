@@ -20,6 +20,8 @@ The adapter exposes exactly one tool, `officecli`, with one required input: `com
 
 Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Each successful `office_os.py begin` reserves and returns one run-specific `candidate_directory` below that root. A manual fixed-output run remains `awaiting_confirmation` until the owner explicitly approves the compact task agreement through `office_os.py confirm`; before that transition, do not copy a source, create a candidate, call the adapter, record progress, or publish. Before a tool call after confirmation:
 
+Manual candidate mutation requires Core confirmation. The Node adapter validates structured command grammar and candidate containment; it does not inspect or replace the Core's owner-confirmation state.
+
 1. fingerprint every source through the Office OS core;
 2. create a new candidate or copy the source into the returned `candidate_directory`;
 3. pass only the staged candidate and contained file-bearing property values;

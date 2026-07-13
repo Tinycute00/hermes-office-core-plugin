@@ -33,6 +33,8 @@ Ask one question at a time only when all of these are true:
 
 For clear requests, inspect and act without an interview. For ambiguous requests, ask in this order: source, result/audience, stable output identity, then business rule. After the final answer, state one task agreement. For a manual fixed-output write, then ask exactly one short confirmation to create or replace that named stable output; do not author a candidate, call OfficeCLI, record progress, or publish before the owner says yes. Read-only and preauthorized scheduled runs proceed after the agreement.
 
+Manual candidate mutation requires Core confirmation. The adapter's candidate restriction is a separate safety check and never supplies owner consent.
+
 Use one agreement per run. Do not request confirmation after each slide, page, sheet, or topic. Report chunk progress only when it helps the user follow a long job.
 
 ## Authority contract

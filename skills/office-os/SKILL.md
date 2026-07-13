@@ -55,6 +55,8 @@ For a manual fixed-output run, `begin` returns `awaiting_confirmation`. Ask the 
 
 Before `confirm`, do not copy a source into the candidate directory, invoke OfficeCLI, record chunk progress, or publish. If the owner declines, explicitly fail the run and retain the existing output.
 
+Manual candidate mutation requires Core confirmation. The Node adapter enforces candidate and path policy only; it does not infer, grant, or replace the Core confirmation transition.
+
 Keep sources unchanged. Use the stable task label as the task key, publish writable results to a sibling `Office OS Output` folder, and replace the same stable target when that task repeats. That identity is collision-safe: every task key and task-derived output name includes a digest of its normalized label, so punctuation collisions stay distinct while case and whitespace variants remain the same task. Never create timestamped output identities or caller-selected output identities.
 
 Use Codex's installed spreadsheet, document, presentation, and PDF capabilities for authoring and visual inspection. Use this skill's Python core for fingerprints, indexing, run state, overlap control, candidate validation, backup rotation, cleanup, and final publish.
