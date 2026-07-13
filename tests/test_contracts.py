@@ -127,6 +127,8 @@ class ContractCase(unittest.TestCase):
         self.assertIn("authoritative `PLUGIN_DATA` value injected by the Office OS hook", text)
         self.assertIn("Never run a core or manager command without that exact value", text)
         self.assertNotIn("Create the candidate in the target directory", text)
+        self.assertIn("Source-free creation is not a `begin` workflow", text)
+        self.assertIn("symlink, junction/reparse point, or hard link", text)
 
     def test_intake_final_reply_contract_is_shared(self) -> None:
         texts = (
@@ -232,6 +234,10 @@ class ContractCase(unittest.TestCase):
             "required Open XML roots",
             "digest suffix",
             "active revision across all workspaces",
+            "Retain at most 256 ordinary workspace-state directories",
+            "never an active/running state",
+            "do not traverse reparse points",
+            "symlink, junction/reparse point, or hard link",
         ):
             self.assertIn(marker, text)
         for stale in (

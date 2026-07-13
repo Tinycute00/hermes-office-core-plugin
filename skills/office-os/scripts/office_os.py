@@ -22,6 +22,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 import time
 from typing import Any, Iterable, Iterator, Sequence
@@ -75,6 +76,7 @@ KNOWN_EXTENSIONS = (
 OUTPUT_DIRECTORY_NAME = "Office OS Output"
 BACKUP_COUNT = 3
 MAX_PUBLISH_RECORDS = 256
+MAX_WORKSPACE_STATES = 256
 MAX_FULL_TEXT_ROOTS = 32
 MAX_KNOWLEDGE_DOCUMENTS = 256
 MAX_KNOWLEDGE_CHUNKS = 4_096
@@ -300,6 +302,92 @@ def cleanup_after_committed_publish(state: dict[str, Any]) -> tuple[bool, str | 
         return False, str(error)
 
 
+def workspace_state_is_active(directory: Path) -> bool:
+    return read_run_state(directory).get("status") in ACTIVE_RUN_STATUSES
+
+
+def remove_inactive_workspace_state(directory: Path) -> None:
+    pending = [directory]
+    directories: list[Path] = []
+    while pending:
+        current = pending.pop()
+        try:
+            current_status = current.lstat()
+        except OSError as error:
+            raise OfficeOSError(
+                f"Cannot inspect Office OS workspace state entry: {error}"
+            ) from error
+        if is_linklike(current) or not stat.S_ISDIR(current_status.st_mode):
+            raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
+        directories.append(current)
+        try:
+            children = list(current.iterdir())
+        except OSError as error:
+            raise OfficeOSError(
+                f"Cannot inspect Office OS workspace state entry: {error}"
+            ) from error
+        for child in children:
+            try:
+                child_status = child.lstat()
+            except OSError as error:
+                raise OfficeOSError(
+                    f"Cannot inspect Office OS workspace state entry: {error}"
+                ) from error
+            if is_linklike(child):
+                try:
+                    if stat.S_ISDIR(child_status.st_mode):
+                        child.rmdir()
+                    else:
+                        child.unlink()
+                except OSError as error:
+                    raise OfficeOSError(
+                        f"Cannot remove Office OS workspace link entry: {error}"
+                    ) from error
+            elif stat.S_ISDIR(child_status.st_mode):
+                pending.append(child)
+            elif stat.S_ISREG(child_status.st_mode):
+                try:
+                    child.unlink()
+                except OSError as error:
+                    raise OfficeOSError(
+                        f"Cannot remove Office OS workspace state entry: {error}"
+                    ) from error
+            else:
+                raise OfficeOSError("Office OS workspace state entry is invalid.")
+    for current in reversed(directories):
+        try:
+            current.rmdir()
+        except OSError as error:
+            raise OfficeOSError(
+                f"Cannot remove Office OS workspace state entry: {error}"
+            ) from error
+
+
+def prune_inactive_workspace_states(workspaces: Path, current: Path) -> None:
+    try:
+        entries = list(workspaces.iterdir())
+    except OSError as error:
+        raise OfficeOSError(f"Cannot inspect Office OS workspace state root: {error}") from error
+    inactive: list[tuple[int, str, Path]] = []
+    for workspace in entries:
+        try:
+            status = workspace.lstat()
+        except OSError as error:
+            raise OfficeOSError(
+                f"Cannot inspect Office OS workspace state entry: {error}"
+            ) from error
+        if is_linklike(workspace) or not stat.S_ISDIR(status.st_mode):
+            raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
+        if workspace != current and not workspace_state_is_active(workspace):
+            inactive.append((status.st_mtime_ns, workspace.name, workspace))
+    remaining = len(entries)
+    for _modified, _name, workspace in sorted(inactive):
+        if remaining <= MAX_WORKSPACE_STATES:
+            break
+        remove_inactive_workspace_state(workspace)
+        remaining -= 1
+
+
 def get_workspace_dir(cwd: str | Path | None = None) -> Path:
     canonical = canonical_workspace(cwd)
     workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
@@ -318,6 +406,7 @@ def get_workspace_dir(cwd: str | Path | None = None) -> Path:
         directory.mkdir()
     if directory.resolve(strict=True).parent != workspaces.resolve(strict=True):
         raise OfficeOSError("Office OS workspace state entry escapes plugin data.")
+    prune_inactive_workspace_states(workspaces, directory)
     return directory
 
 
@@ -1339,13 +1428,15 @@ def read_run_state(directory: Path) -> dict[str, Any]:
 
 
 def command_begin(args: argparse.Namespace) -> int:
-    directory = get_workspace_dir(args.cwd)
-    data_root = ensure_plugin_data_root()
+    if not args.source:
+        raise OfficeOSError("Office OS begin requires at least one source.")
     if args.units < 0:
         raise OfficeOSError("Unit count cannot be negative.")
     if args.units > MAX_RUN_UNITS:
         raise OfficeOSError(f"Unit count cannot exceed {MAX_RUN_UNITS}.")
-    source_fingerprints = fingerprint_sources(args.source or [])
+    source_fingerprints = fingerprint_sources(args.source)
+    directory = get_workspace_dir(args.cwd)
+    data_root = ensure_plugin_data_root()
     task_key = stable_task_key(args.task)
     run_id = uuid.uuid4().hex
     with state_lock(directory):
@@ -1642,7 +1733,15 @@ def backup_path(target: Path, number: int) -> Path:
     return target.with_name(f"{target.name}.bak.{number}")
 
 
+def validate_scheduled_backup_leaves(target: Path) -> None:
+    for number in range(1, BACKUP_COUNT + 1):
+        validate_state_leaf(
+            backup_path(target, number), "Office OS scheduled backup leaf"
+        )
+
+
 def rotate_backups(target: Path) -> None:
+    validate_scheduled_backup_leaves(target)
     oldest = backup_path(target, BACKUP_COUNT)
     oldest.unlink(missing_ok=True)
     for number in range(BACKUP_COUNT - 1, 0, -1):
@@ -2149,6 +2248,7 @@ def build_parser() -> argparse.ArgumentParser:
     begin.add_argument(
         "--source",
         action="append",
+        required=True,
         help="Source file fingerprinted at task start; repeat for cross-file tasks.",
     )
     begin.add_argument("--mode", choices=["manual", "scheduled"], default="manual")

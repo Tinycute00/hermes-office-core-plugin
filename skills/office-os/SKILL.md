@@ -55,7 +55,7 @@ Resolve the bundled scripts/office_os.py from this SKILL.md and invoke it by abs
 
     python "<office-os>/scripts/office_os.py" begin --task "<stable task label>" --source "<source>" --intent <intent> --object <object> --permission <permission> --qa <qa> --units <count>
 
-Repeat --source for cross-file work. Omit it only for a genuinely source-free creation. Read the returned `candidate_directory`; it is the run-specific authoring directory under the fixed `PLUGIN_DATA/officecli-candidates` staging root.
+Repeat --source for cross-file work. A normal `begin` requires at least one actual source. Source-free creation is not a `begin` workflow; keep it read-only and ask for a real local source path or folder. Read the returned `candidate_directory`; it is the run-specific authoring directory under the fixed `PLUGIN_DATA/officecli-candidates` staging root.
 
 For a manual fixed-output run, `begin` returns `awaiting_confirmation`. Ask the one short owner question, then only after an explicit yes unlock that run:
 
@@ -109,7 +109,7 @@ Publish with:
 
 Repeat --source for a cross-file task so the no-op fingerprint covers every input.
 
-For scheduled work, use --mode scheduled. Manual replacement keeps no history. Scheduled replacement keeps only `.bak.1`, `.bak.2`, and `.bak.3`. If the source hash is unchanged, treat the run as a no-op: do not rewrite the output or create a backup. Keep only `latest_summary.json`, never a per-run summary history. A failed candidate must leave the previous published output usable.
+For scheduled work, use --mode scheduled. Manual replacement keeps no history. Scheduled replacement keeps only `.bak.1`, `.bak.2`, and `.bak.3`. Before rotation or copying, Core rejects a backup leaf that is a symlink, junction/reparse point, or hard link and leaves the prior output and backup leaf untouched. If the source hash is unchanged, treat the run as a no-op: do not rewrite the output or create a backup. Keep only `latest_summary.json`, never a per-run summary history. A failed candidate must leave the previous published output usable.
 
 Same-volume replacement reduces partial-write risk; describe it as replacement publishing, not as an absolute crash-safe transaction.
 

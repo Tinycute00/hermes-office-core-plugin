@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "skills" / "office-os" / "scripts" / "office_os.py"
 CANDIDATES = ROOT / "skills" / "office-os" / "scripts" / "office_candidates.py"
+AUTHORITY = ROOT / "scripts" / "officecli-mcp" / "authority.cjs"
 
 
 class OfficeOSTestSetupError(RuntimeError):
@@ -293,6 +295,27 @@ class CoreCase(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 2)
         self.assertIn("PLUGIN_DATA", json.loads(completed.stdout)["error"])
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_begin_requires_source_before_creating_workspace_or_candidate(self) -> None:
+        completed = self.run_core_raw(
+            "begin",
+            "--task",
+            "source required",
+            "--intent",
+            "update",
+            "--object",
+            "excel",
+            "--permission",
+            "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("--source", completed.stderr)
         self.assertFalse(self.plugin_data.exists())
 
     def test_index_upserts_queries_chinese_and_purges_deleted_sources(self) -> None:
@@ -851,6 +874,58 @@ class CoreCase(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
+    def test_scheduled_publish_rejects_hard_linked_backup_without_replacing_output(
+        self,
+    ) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source-0")
+        state = self.begin_publish_run("backup safety", (source,), mode="scheduled")
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "output-0")
+        first, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "backup safety",
+            "--mode",
+            "scheduled",
+        )
+        target = Path(first["target"])
+        previous = target.read_bytes()
+        self.run_core("complete", "--summary", "baseline")
+
+        sentinel = self.base / "outside-backup.xlsx"
+        sentinel.write_bytes(b"outside backup sentinel")
+        backup = Path(f"{target}.bak.1")
+        os.link(sentinel, backup)
+
+        write_xlsx(source, "source-1")
+        state = self.begin_publish_run("backup safety", (source,), mode="scheduled")
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "output-1")
+        rejected, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "backup safety",
+            "--mode",
+            "scheduled",
+            expected=2,
+        )
+
+        self.assertIn("backup", rejected["error"].lower())
+        self.assertEqual(target.read_bytes(), previous)
+        self.assertTrue(backup.is_file())
+        self.assertGreater(backup.stat().st_nlink, 1)
+        self.assertEqual(sentinel.read_bytes(), b"outside backup sentinel")
+        self.run_core("fail", "--reason", "unsafe backup leaf")
+
     def test_manual_publish_has_no_history_and_invalid_candidate_preserves_output(self) -> None:
         source = self.workspace / "source.xlsx"
         write_xlsx(source, "source")
@@ -943,6 +1018,8 @@ class CoreCase(unittest.TestCase):
         )
 
     def test_candidate_cleanup_refuses_a_linked_staging_root(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
         candidate_root = self.plugin_data / "officecli-candidates"
         candidate_root.parent.mkdir(parents=True)
         outside = self.base / "outside-candidates"
@@ -974,6 +1051,8 @@ class CoreCase(unittest.TestCase):
                 "fast",
                 "--units",
                 "1",
+                "--source",
+                os.fspath(source),
                 expected=2,
             )
             self.assertIn("linked", error["error"])
@@ -1289,23 +1368,26 @@ class CoreCase(unittest.TestCase):
                     testzip.assert_not_called()
                     validate_openxml.assert_not_called()
 
-    def test_source_free_run_rejects_a_late_source_at_publish(self) -> None:
-        state = self.begin_publish_run("來源自由建立", ())
-        late_source = self.workspace / "late.xlsx"
-        write_xlsx(late_source, "late")
-
-        result, _ = self.run_core(
-            "publish",
-            "--candidate",
-            os.fspath(self.candidate_for(state)),
-            "--source",
-            os.fspath(late_source),
+    def test_source_free_read_only_begin_requires_a_real_source(self) -> None:
+        completed = self.run_core_raw(
+            "begin",
             "--task",
-            "來源自由建立",
-            expected=2,
+            "read-only source required",
+            "--intent",
+            "inspect",
+            "--object",
+            "excel",
+            "--permission",
+            "read-only",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
         )
-        self.assertIn("sources", result["error"])
-        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("--source", completed.stderr)
+        self.assertFalse(self.plugin_data.exists())
 
     def test_publish_rejects_target_outside_fixed_output_directory(self) -> None:
         source = self.workspace / "source.xlsx"
@@ -1367,6 +1449,8 @@ class CoreCase(unittest.TestCase):
         self.run_core("fail", "--reason", "test cleanup")
 
     def test_scheduled_single_flight_and_latest_summary_are_bounded(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
         arguments = (
             "--task",
             "每日報表",
@@ -1380,6 +1464,8 @@ class CoreCase(unittest.TestCase):
             "fast",
             "--units",
             "2",
+            "--source",
+            os.fspath(source),
             "--mode",
             "scheduled",
         )
@@ -1569,6 +1655,8 @@ class CoreCase(unittest.TestCase):
         second_workspace = self.base / "second-workspace"
         second_workspace.mkdir()
         self.workspace = second_workspace
+        second_source = second_workspace / "second-source.xlsx"
+        write_xlsx(second_source, "second-source")
         second, _ = self.run_core(
             "begin",
             "--task",
@@ -1583,12 +1671,67 @@ class CoreCase(unittest.TestCase):
             "fast",
             "--units",
             "1",
+            "--source",
+            os.fspath(second_source),
         )
         self.assertEqual(second["status"], "awaiting_confirmation")
         self.assertTrue(candidate.exists())
         self.run_core("complete", "--summary", "second complete")
         self.workspace = first_workspace
         self.run_core("fail", "--reason", "first cleanup")
+
+    def test_workspace_retention_prunes_inactive_state_before_officecli_authority_limit(
+        self,
+    ) -> None:
+        source = self.workspace / "active-source.xlsx"
+        write_xlsx(source, "active-source")
+        active = self.begin_publish_run("active authority", (source,))
+        candidate = self.candidate_for(active)
+        write_xlsx(candidate, "active-candidate")
+        os.utime(candidate, (0, 0))
+        active_state = self.workspace_data()
+        workspaces = active_state.parent
+        for number in range(512):
+            (workspaces / f"inactive-{number:03d}").mkdir()
+
+        second_workspace = self.base / "second-workspace"
+        second_workspace.mkdir()
+        self.workspace = second_workspace
+        second_source = second_workspace / "second-source.xlsx"
+        write_xlsx(second_source, "second-source")
+        self.begin_publish_run("trigger retention", (second_source,))
+
+        self.assertTrue((active_state / "run_state.json").is_file())
+        self.assertTrue(candidate.is_file())
+        self.assertLessEqual(len(list(workspaces.iterdir())), 256)
+
+        script = (
+            "const authority=require(process.argv[1]);"
+            "try{process.stdout.write(JSON.stringify({run:authority.authorizeMutation(process.argv[2])}));}"
+            "catch(error){process.stdout.write(JSON.stringify({error:error.message}));}"
+        )
+        environment = os.environ.copy()
+        environment["PLUGIN_DATA"] = os.fspath(self.plugin_data)
+        completed = subprocess.run(
+            [
+                shutil.which("node") or "node",
+                "-e",
+                script,
+                os.fspath(AUTHORITY),
+                os.fspath(candidate),
+            ],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        authority = json.loads(completed.stdout)
+        self.assertNotIn("error", authority)
+        self.assertEqual(Path(authority["run"]["candidate"]), candidate.resolve())
 
     def test_begin_reserves_candidate_directory_before_first_publish(self) -> None:
         first_workspace = self.workspace
@@ -1603,7 +1746,9 @@ class CoreCase(unittest.TestCase):
         second_workspace = self.base / "second-workspace"
         second_workspace.mkdir()
         self.workspace = second_workspace
-        self.begin_publish_run("另一工作區", ())
+        second_source = second_workspace / "second-source.xlsx"
+        write_xlsx(second_source, "second-source")
+        self.begin_publish_run("另一工作區", (second_source,))
         self.assertTrue(candidate.is_file())
         self.run_core("complete", "--summary", "second complete")
 
@@ -1655,7 +1800,9 @@ class CoreCase(unittest.TestCase):
         self.assertFalse((self.workspace / "Office OS Output").exists())
 
     def test_candidate_cleanup_fails_closed_on_semantically_invalid_active_state(self) -> None:
-        state = self.begin_publish_run("語意損壞狀態", ())
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("語意損壞狀態", (source,))
         candidate_directory = Path(state["candidate_directory"])
         candidate = candidate_directory / "candidate.xlsx"
         write_xlsx(candidate, "draft")
@@ -1677,7 +1824,9 @@ class CoreCase(unittest.TestCase):
 
     def test_candidate_cleanup_fails_closed_on_malformed_active_inventory(self) -> None:
         first_workspace = self.workspace
-        state = self.begin_publish_run("損壞狀態", ())
+        source = first_workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("損壞狀態", (source,))
         candidate = self.candidate_for(state)
         write_xlsx(candidate, "draft")
         os.utime(candidate, (0, 0))
@@ -1686,6 +1835,8 @@ class CoreCase(unittest.TestCase):
         second_workspace = self.base / "second-workspace"
         second_workspace.mkdir()
         self.workspace = second_workspace
+        second_source = second_workspace / "second-source.xlsx"
+        write_xlsx(second_source, "second-source")
         result, _ = self.run_core(
             "begin",
             "--task",
@@ -1700,6 +1851,8 @@ class CoreCase(unittest.TestCase):
             "fast",
             "--units",
             "1",
+            "--source",
+            os.fspath(second_source),
             expected=2,
         )
         self.assertIn("run state", result["error"])
@@ -1830,6 +1983,8 @@ class CoreCase(unittest.TestCase):
                     linked.unlink()
 
     def test_core_rejects_linked_workspace_state_ancestors(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
         self.plugin_data.mkdir()
         outside = self.base / "outside-workspaces"
         outside.mkdir()
@@ -1861,6 +2016,8 @@ class CoreCase(unittest.TestCase):
                 "fast",
                 "--units",
                 "1",
+                "--source",
+                os.fspath(source),
                 expected=2,
             )
             self.assertIn("linked", result["error"])
@@ -1928,6 +2085,8 @@ class CoreCase(unittest.TestCase):
         self.run_core("fail", "--reason", "missing relationship")
 
     def test_core_rejects_linked_plugin_data_before_state_write(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
         real_data = self.base / "real-plugin-data"
         real_data.mkdir()
         sentinel = real_data / "sentinel.txt"
@@ -1959,6 +2118,8 @@ class CoreCase(unittest.TestCase):
                 "fast",
                 "--units",
                 "1",
+                "--source",
+                os.fspath(source),
                 expected=2,
             )
             self.assertIn("linked", result["error"])
@@ -1972,6 +2133,8 @@ class CoreCase(unittest.TestCase):
                     linked_data.unlink()
 
     def test_core_rejects_linked_plugin_data_ancestor_before_state_write(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
         outside = self.base / "outside-ancestor"
         plugin_data = outside / "plugin-data"
         plugin_data.mkdir(parents=True)
@@ -2004,6 +2167,8 @@ class CoreCase(unittest.TestCase):
                 "fast",
                 "--units",
                 "1",
+                "--source",
+                os.fspath(source),
                 expected=2,
             )
             self.assertIn("linked", result["error"])
