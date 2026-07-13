@@ -4,9 +4,9 @@ This file owns the base behavior of Office OS. Object files own format-specific 
 
 ## Intent envelope
 
-For an Office intake, return exactly one final assistant message. Its first line is the intent envelope, before greetings, plans, caveats, or tool activity summaries. If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
+For an Office intake with a named local source path or folder, return exactly one final assistant message. Its first line is the intent envelope, before greetings, plans, caveats, or tool activity summaries. If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
-When the prompt does not name a local source path or folder, send that intake reply as the first visible response. The envelope is the first line and the message contains at most one short source question. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create state, a candidate, an output, or a schedule until the user names a source. An explicit `$office-os` invocation can load this skill, but do not load workflow references until the source is named. Prompts that already name a local source path or folder follow normal Office routing.
+When the prompt does not name a local source path or folder, begin with a compact intent classification, then send the envelope and at most one short source question before any Office data work. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create state, a candidate, an output, or a schedule until the user names a source. An explicit `$office-os` invocation can load this skill, but do not load workflow references until the source is named. Prompts that already name a local source path or folder follow normal Office routing.
 
 | Dimension | Values | Decision rule |
 | --- | --- | --- |

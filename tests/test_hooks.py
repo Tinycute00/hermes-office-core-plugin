@@ -121,7 +121,7 @@ class HookCase(unittest.TestCase):
         ):
             self.assertIn(marker, context)
 
-    def test_missing_source_intake_frontloads_exact_envelope_before_office_work(self) -> None:
+    def test_missing_source_intake_classifies_before_office_work(self) -> None:
         result = self.run_hook(
             self.prompt_payload("請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。")
         )
@@ -131,13 +131,14 @@ class HookCase(unittest.TestCase):
 
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
         self.assertIn(
-            "FIRST USER-VISIBLE RESPONSE MUST BE EXACTLY:", context
-        )
-        self.assertIn(
-            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
-            "Excel 來源檔或資料夾路徑是什麼？",
+            "FIRST USER-VISIBLE RESPONSE MUST BEGIN WITH A COMPACT INTENT CLASSIFICATION:",
             context,
         )
+        self.assertIn(
+            "After loading this skill, provide this canonical envelope and one source request:",
+            context,
+        )
+        self.assertIn("意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速", context)
         self.assertIn("Do not inspect or alter Office data", context)
         self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
         self.assertIn(
