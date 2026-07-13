@@ -84,15 +84,12 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "Source-free Office intake: classify the request before workflow work"
+                "Source-free Office intake: return one self-contained two-line final reply"
             ),
             description,
         )
-        self.assertIn("one source-path question under a read-only boundary", description)
-        self.assertIn(
-            "Prefer a structured intent/object/read-only summary",
-            description,
-        )
+        self.assertIn("intent envelope, then source-path question", description)
+        self.assertNotIn("Prefer", description)
         self.assertIn("No Office data work before source", description)
 
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
@@ -149,7 +146,16 @@ class ContractCase(unittest.TestCase):
             ):
                 self.assertIn(marker, text)
             self.assertIn("with a named local source path or folder", text)
-            self.assertIn("at most one short source question under the read-only boundary", text)
+            self.assertIn("Use `權限：唯讀` in that envelope", text)
+            self.assertIn(
+                "exactly one final assistant message with exactly two non-empty lines",
+                text,
+            )
+            self.assertIn(
+                "first line is the intent envelope and the second line is the one short source question",
+                text,
+            )
+            self.assertNotIn("Prefer the canonical envelope", text)
 
     def test_readme_describes_source_free_intake_as_classification_first(self) -> None:
         text = (ROOT / "README.md").read_text(encoding="utf-8")

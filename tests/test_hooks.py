@@ -140,15 +140,15 @@ class HookCase(unittest.TestCase):
 
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
         self.assertIn(
-            "FIRST USER-VISIBLE RESPONSE MUST BEGIN WITH A COMPACT INTENT CLASSIFICATION:",
+            "FINAL USER-VISIBLE REPLY MUST BE EXACTLY TWO NON-EMPTY LINES:",
             context,
         )
         self.assertIn(
-            "After loading this skill, ask one source request while retaining the read-only boundary.",
+            "Use the supplied envelope and source question verbatim; do not emit a preamble, plan, skill announcement, or separate progress message.",
             context,
         )
-        self.assertIn("Prefer this canonical envelope when host output allows:", context)
         self.assertIn("意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速", context)
+        self.assertNotIn("Prefer this canonical envelope", context)
         self.assertIn("Do not inspect or alter Office data", context)
         self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
         self.assertIn(
