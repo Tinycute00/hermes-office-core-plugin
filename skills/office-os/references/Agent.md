@@ -6,6 +6,8 @@ This file owns the base behavior of Office OS. Object files own format-specific 
 
 For an Office intake, return exactly one final assistant message. Its first line is the intent envelope, before greetings, plans, caveats, or tool activity summaries. If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
+When the prompt does not name a local source path or folder, send that intake reply before invoking Office OS, making a tool call, reading a file or reference, announcing a skill, planning, or reporting progress. The envelope is the first line and the message contains at most one short source question. After the reply, once the user names a source, invoke the workflow and read the needed references. Prompts that already name a local source path or folder follow normal Office routing.
+
 | Dimension | Values | Decision rule |
 | --- | --- | --- |
 | Intent | 查找, 分析, 檢查, 建立, 更新, 整合, 排程 | Choose the user's requested outcome, not the tool you happen to use. |

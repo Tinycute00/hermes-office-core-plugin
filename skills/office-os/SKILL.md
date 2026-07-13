@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: Orchestrate local-first office workflows across Excel (.xlsx), Word (.docx), PowerPoint (.pptx), and read-only PDF files. Use for natural-language requests to find, analyze, review, create, update, integrate, or schedule recurring work involving spreadsheets, documents, slides, PDFs, or cross-file data; trigger on Office file paths and ordinary terms such as Excel, Word, PowerPoint, PDF, workbook, document, presentation, 試算表, 文件, 簡報, 報表, 對帳, 彙整, 更新, or recurring office tasks.
+description: "For Office prompts without a named local source path or folder: before tools/references, send exactly one final assistant reply with a Chinese intent envelope on the first line and at most one short source question. Then orchestrate local-first office workflows across Excel (.xlsx), Word (.docx), PowerPoint (.pptx), and read-only PDF files. Use for natural-language requests to find, analyze, review, create, update, integrate, or schedule recurring work involving spreadsheets, documents, slides, PDFs, or cross-file data; trigger on Office file paths and ordinary terms such as Excel, Word, PowerPoint, PDF, workbook, document, presentation, 試算表, 文件, 簡報, 報表, 對帳, 彙整, 更新, or recurring office tasks."
 ---
 
 # Office OS
@@ -21,6 +21,8 @@ Choose one value per dimension:
 - 檢查: 快速, 加強, 完整
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
+
+For a prompt without a named local source path or folder, that final reply takes priority over all workflow activity: do not invoke this skill, make a tool call, read a file or reference, emit progress, plan, or announce a skill beforehand. Use the envelope as the first line and ask at most one short source question. Only after that reply, and once the user names a source, invoke this workflow and read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 

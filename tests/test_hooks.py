@@ -121,6 +121,36 @@ class HookCase(unittest.TestCase):
         ):
             self.assertIn(marker, context)
 
+    def test_missing_source_intake_defers_skill_and_references_until_reply(self) -> None:
+        result = self.run_hook(self.prompt_payload("請更新 Excel 報表並整理本月差異。"))
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        missing_source_rule = (
+            "If the prompt does not name a local source path or folder, reply first "
+            "with exactly one final assistant message"
+        )
+        deferred_work = (
+            "After that reply and once the user names a source, invoke $office-os and read"
+        )
+        skill_path = ROOT / "skills" / "office-os" / "SKILL.md"
+
+        self.assertIn(missing_source_rule, context)
+        self.assertIn("first line must be the intent envelope", context)
+        self.assertIn("Chinese intent envelope", context)
+        self.assertIn("at most one short source question", context)
+        self.assertIn("Do not make a tool call, read a file or reference", context)
+        self.assertIn(deferred_work, context)
+        self.assertLess(context.index(missing_source_rule), context.index(deferred_work))
+        deferred_reference_read = (
+            "Only after that reply and once the user names a source, read "
+            f"{skill_path} and the relevant references"
+        )
+        self.assertIn(deferred_reference_read, context)
+        self.assertLess(
+            context.index(deferred_work), context.index(deferred_reference_read)
+        )
+        self.assertNotIn(f"Read {skill_path} and the relevant references", context)
+
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
         environment = os.environ.copy()
         environment.pop("PLUGIN_DATA", None)

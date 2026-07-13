@@ -71,6 +71,28 @@ class ContractCase(unittest.TestCase):
         for reference in sorted(references):
             self.assertIn(f"[{reference}](references/{reference})", text)
 
+    def test_skill_description_starts_with_missing_source_final_intake_contract(self) -> None:
+        text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        frontmatter = text.split("---", 2)[1]
+        description = next(
+            line.removeprefix("description: ").strip('"')
+            for line in frontmatter.splitlines()
+            if line.startswith("description:")
+        )
+
+        self.assertTrue(
+            description.startswith(
+                "For Office prompts without a named local source path or folder: "
+                "before tools/references, send exactly one final assistant reply"
+            ),
+            description,
+        )
+        self.assertIn("Chinese intent envelope on the first line", description)
+        self.assertIn("at most one short source question", description)
+        self.assertIn("before tools/references", description)
+
     def test_office_workflow_policy_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
             encoding="utf-8"
