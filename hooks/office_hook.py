@@ -100,7 +100,7 @@ OFFICE_EXTENSION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LOCAL_PATH_PATTERN = re.compile(
-    r"(?<!\w)(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))"
+    r"(?<![\w\"'])(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^\s<>\"']*"
 )
 BARE_OFFICE_FILENAME_PATTERN = re.compile(
     r"(?<![\w.-])[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
@@ -109,6 +109,10 @@ BARE_OFFICE_FILENAME_PATTERN = re.compile(
 QUOTED_OFFICE_FILENAME_PATTERN = re.compile(
     r"(?:\"[^\"\r\n]+\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b\"|'[^'\r\n]+\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b')",
     re.IGNORECASE,
+)
+QUOTED_LOCAL_PATH_PATTERN = re.compile(
+    r'"(?P<double>(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^"\r\n]+)"'
+    r"|'(?P<single>(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^'\r\n]+)'"
 )
 ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
 MAX_DEDUP_KEYS = 128
@@ -357,13 +361,22 @@ def is_office_prompt(prompt: str) -> bool:
     return bool(ACTION_PATTERN.search(cleaned) and object_hints(cleaned))
 
 
-def has_named_local_source(prompt: str) -> bool:
+def has_named_local_source(prompt: str, cwd: str) -> bool:
     cleaned = URL_PATTERN.sub("", strip_code(prompt))
-    return bool(
-        LOCAL_PATH_PATTERN.search(cleaned)
-        or BARE_OFFICE_FILENAME_PATTERN.search(cleaned)
-        or QUOTED_OFFICE_FILENAME_PATTERN.search(cleaned)
+    candidates = [match.group() for match in BARE_OFFICE_FILENAME_PATTERN.finditer(cleaned)]
+    candidates.extend(
+        match.group()[1:-1] for match in QUOTED_OFFICE_FILENAME_PATTERN.finditer(cleaned)
     )
+    candidates.extend(
+        match.group().rstrip(".,;:!?)]}，。；：！？）】")
+        for match in LOCAL_PATH_PATTERN.finditer(cleaned)
+    )
+    for match in QUOTED_LOCAL_PATH_PATTERN.finditer(cleaned):
+        quoted_path = match.group("double") or match.group("single")
+        if quoted_path:
+            candidates.append(quoted_path)
+    directory = Path(cwd)
+    return any((directory / Path(candidate).expanduser()).exists() for candidate in candidates)
 
 
 def source_free_intent(prompt: str) -> str:
@@ -493,7 +506,8 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
     if not prompt or not is_office_prompt(prompt):
         return
-    if not has_named_local_source(prompt):
+    cwd = str(payload.get("cwd") or os.getcwd())
+    if not has_named_local_source(prompt, cwd):
         emit(
             context_output(
                 "UserPromptSubmit",
@@ -501,7 +515,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
             )
         )
         return
-    directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
+    directory = workspace_dir(cwd)
     if not remember_prompt(directory, payload, prompt):
         return
     plugin_root = Path(

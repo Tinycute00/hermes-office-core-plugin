@@ -67,6 +67,7 @@ class HookCase(unittest.TestCase):
             link.unlink()
 
     def assert_state_link_rejected(self, turn: str, outside: Path) -> None:
+        self.create_sources("report.xlsx")
         result = self.run_hook(
             self.prompt_payload("review report.xlsx", turn),
             expected_returncode=1,
@@ -94,7 +95,14 @@ class HookCase(unittest.TestCase):
             "prompt": prompt,
         }
 
+    def create_sources(self, *names: str) -> None:
+        for name in names:
+            path = self.workspace / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch()
+
     def test_office_prompt_injects_skill_and_relevant_reference_once(self) -> None:
+        self.create_sources("budget.xlsx")
         prompt = "請更新 " + chr(96) + "budget.xlsx" + chr(96) + "，保留原檔。"
         payload = self.prompt_payload(prompt)
         first = self.run_hook(payload)
@@ -109,7 +117,8 @@ class HookCase(unittest.TestCase):
         self.assertIsNone(self.run_hook(payload))
 
     def test_office_prompt_requires_one_final_envelope_reply(self) -> None:
-        result = self.run_hook(self.prompt_payload("每週更新 budget.xlsx"))
+        self.create_sources("budget.xlsx")
+        result = self.run_hook(self.prompt_payload('每週更新 "budget.xlsx"'))
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
         for marker in (
@@ -157,6 +166,20 @@ class HookCase(unittest.TestCase):
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
         self.assertFalse(self.plugin_data.exists())
 
+    def test_nonexistent_bare_filename_remains_source_free_without_state(self) -> None:
+        # Given: a fresh cwd and plugin data root with no matching source file.
+        # When: a prompt names a missing Office filename.
+        result = self.run_hook(
+            self.prompt_payload("Please update missing-report.xlsx every week")
+        )
+
+        # Then: the hook stays source-free and writes no workspace or plugin state.
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
+        self.assertFalse(self.plugin_data.exists())
+        self.assertEqual(list(self.workspace.iterdir()), [])
+
     def test_extension_only_prompt_remains_source_free_without_state(self) -> None:
         self.assert_source_free_without_state("Create a new .xlsx file")
 
@@ -164,6 +187,7 @@ class HookCase(unittest.TestCase):
         self.assert_source_free_without_state("Review https://example.com/report.xlsx")
 
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
+        self.create_sources("budget.xlsx")
         environment = os.environ.copy()
         environment.pop("PLUGIN_DATA", None)
         environment["CLAUDE_PLUGIN_DATA"] = os.fspath(self.plugin_data)
@@ -185,8 +209,9 @@ class HookCase(unittest.TestCase):
         self.assertFalse(self.plugin_data.exists())
 
     def test_single_object_schedule_routes_office_and_object_references(self) -> None:
+        self.create_sources("budget.xlsx")
         result = self.run_hook(
-            self.prompt_payload("每週更新 budget.xlsx 並保留排程", "turn-schedule")
+            self.prompt_payload("每週更新 ./budget.xlsx 並保留排程", "turn-schedule")
         )
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
@@ -208,6 +233,7 @@ class HookCase(unittest.TestCase):
         )
 
     def test_cross_file_prompt_routes_to_office_map(self) -> None:
+        self.create_sources("finance.xlsx", "summary.docx")
         result = self.run_hook(
             self.prompt_payload(
                 "比較 finance.xlsx 與 summary.docx，整理差異。", "turn-cross"
@@ -297,6 +323,7 @@ class HookCase(unittest.TestCase):
 
     def test_prompt_dedup_is_bounded(self) -> None:
         for number in range(140):
+            self.create_sources(f"report-{number}.xlsx")
             self.run_hook(
                 self.prompt_payload(
                     f"檢查 report-{number}.xlsx", turn=f"turn-{number}"
@@ -352,6 +379,7 @@ class HookCase(unittest.TestCase):
 
     def test_hook_rejects_hardlinked_dedup_before_write(self) -> None:
         directory = self.workspace_data()
+        self.create_sources("report.xlsx")
         sentinel = self.base / "outside-dedup.json"
         sentinel.write_text("outside dedup", encoding="utf-8")
         os.link(sentinel, directory / "hook_dedup.json")
