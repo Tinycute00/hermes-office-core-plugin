@@ -76,6 +76,8 @@ class ContractCase(unittest.TestCase):
             "PLUGIN_DATA/officecli-candidates",
             "at most 32 files and 2 GiB",
             "replace the same stable target",
+            "collision-safe",
+            "internal relationship targets",
             "Manual replacement keeps no history",
             "`.bak.1`, `.bak.2`, and `.bak.3`",
             "latest_summary.json",
@@ -89,6 +91,9 @@ class ContractCase(unittest.TestCase):
             "PowerPoint: slide → shape tree",
         ):
             self.assertIn(semantic_unit, text)
+        self.assertIn("authoritative `PLUGIN_DATA` value injected by the Office OS hook", text)
+        self.assertIn("Never run a core or manager command without that exact value", text)
+        self.assertNotIn("Create the candidate in the target directory", text)
 
     def test_workflow_has_no_unbounded_or_automatic_policy(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
@@ -130,6 +135,9 @@ class ContractCase(unittest.TestCase):
             "files older than 24 hours",
             "at most 32 ordinary files",
             "at most 2 GiB",
+            "hard-link",
+            "across another workspace's cleanup",
+            "nested link objects are removed",
         )
         for marker in required:
             self.assertIn(marker, text)
@@ -160,6 +168,10 @@ class ContractCase(unittest.TestCase):
             "Do not answer from a stale chunk",
             "metadata-only",
             "not an absolute crash-safe transaction",
+            "1-100 results and 1-8,000 text characters",
+            "required Open XML roots",
+            "digest suffix",
+            "active revision across all workspaces",
         ):
             self.assertIn(marker, text)
         for stale in (
@@ -220,6 +232,19 @@ class ContractCase(unittest.TestCase):
                     self.assertEqual(handler["type"], "command")
                     self.assertIn("commandWindows", handler)
                     self.assertLessEqual(handler["timeout"], 10)
+
+    def test_plugin_data_is_hook_owned_without_a_temp_fallback(self) -> None:
+        paths = (
+            ROOT / "hooks" / "office_hook.py",
+            ROOT / "scripts" / "officecli_runtime.py",
+            ROOT / "scripts" / "officecli-mcp.cjs",
+            ROOT / "scripts" / "officecli-mcp" / "paths.cjs",
+            ROOT / "skills" / "office-os" / "scripts" / "office_os.py",
+        )
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("office-os-plugin-data", text, path.name)
+            self.assertIn("PLUGIN_DATA", text, path.name)
 
     def test_old_hermes_package_surface_is_removed(self) -> None:
         self.assertFalse((ROOT / "office_core_plugin").exists())
