@@ -24,8 +24,8 @@ Use these bounded artifacts:
 
 | Artifact | Purpose | Retention |
 | --- | --- | --- |
-| office.db | SQLite documents, chunks, relations, FTS | Upsert in place |
-| run_state.json | One active run | Replace; remove after completion |
+| office.db | SQLite documents, chunks, relations, FTS | Latest 256 documents, 4,096 chunks, and 16 MiB UTF-8 text; deterministic eviction |
+| run_state.json | One active run, including a pending manual confirmation | Replace; remove after completion |
 | latest_summary.json | Latest completed result | Replace |
 | hook_dedup.json | Recent prompt keys | Last 128 only |
 | publish_state.json | Last successful source fingerprint per task | Latest 256 live stable tasks |
@@ -42,7 +42,7 @@ Supported v1 classes:
 | .xlsx | Excel Open XML | Yes when allowed | Derived .xlsx |
 | .docx | Word Open XML | Yes when allowed | Derived .docx |
 | .pptx | PowerPoint Open XML | Yes when allowed | Derived .pptx |
-| .pdf | PDF | Yes when extractable and allowed | Read-only |
+| .pdf | PDF | Metadata only; never persist body text | Read-only |
 | .xls, .doc, .ppt | Legacy binary | Metadata only | Convert first |
 | .xlsm, .docm, .pptm | Macro-enabled | Metadata only by default | Convert first |
 
@@ -62,7 +62,7 @@ Classify a file metadata-only when any signal indicates:
 
 For metadata-only files, store canonical path, object class, size, timestamps, SHA-256, sensitivity reason, and package-level part names. Do not store extracted body text, formulas, notes, comments, or embedded content.
 
-Explicit per-task permission can allow transient content use for an active task. It does not silently change the persistent indexing policy. Persist full text only after the user explicitly allows that workspace or file class.
+Explicit per-task permission can allow transient content use for an active task. It does not silently change the persistent indexing policy. Persist full text only after the user explicitly allows that workspace or file class; PDFs always remain metadata-only.
 
 The CLI treats `--cwd` as the configured local root and rejects index paths outside
 it. A normal `index` run is metadata-only by default. After the owner explicitly
@@ -81,11 +81,11 @@ Use a resumable, metadata-first process:
 2. Upsert metadata and fingerprint in one transaction.
 3. Purge rows for files no longer present.
 4. Skip content extraction when hash and policy are unchanged.
-5. Extract allowed content on demand for the current query or in a bounded batch.
+5. Extract allowed Open XML content on demand for the current query or in a bounded batch; PDFs remain metadata-only. Before reading any Open XML part, reject archives over 64 MiB, packages over 10,000 members, members over 64 MiB, totals over 512 MiB, or a member expansion ratio over 100:1.
 6. Replace all chunks for one document in one transaction.
 7. Mark index status complete only after chunk and FTS replacement commits.
 
-If extraction fails, retain metadata, set status error with a short replaceable reason, and continue with other files. A later run retries only changed or incomplete documents.
+If extraction fails, retain metadata, set status error with a short replaceable reason, and continue with other files. A later run retries only changed or incomplete documents. The map retains at most 256 documents, 4,096 chunks, and 16 MiB of UTF-8 body text. When a limit is reached, evict whole documents deterministically by oldest source modification time and then canonical path; chunk and FTS rows leave with their document.
 
 ## Knowledge model
 

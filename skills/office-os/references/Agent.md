@@ -31,7 +31,7 @@ Ask one question at a time only when all of these are true:
 2. a reasonable assumption could materially change the business result;
 3. useful work cannot continue on an unaffected chunk.
 
-For clear requests, inspect and act without an interview. For ambiguous requests, ask in this order: source, result/audience, stable output identity, then business rule. After the final answer, state one task agreement and proceed.
+For clear requests, inspect and act without an interview. For ambiguous requests, ask in this order: source, result/audience, stable output identity, then business rule. After the final answer, state one task agreement. For a manual fixed-output write, then ask exactly one short confirmation to create or replace that named stable output; do not author a candidate, call OfficeCLI, record progress, or publish before the owner says yes. Read-only and preauthorized scheduled runs proceed after the agreement.
 
 Use one agreement per run. Do not request confirmation after each slide, page, sheet, or topic. Report chunk progress only when it helps the user follow a long job.
 
@@ -40,6 +40,7 @@ Use one agreement per run. Do not request confirmation after each slide, page, s
 - 唯讀 permits lookup, extraction, analysis, comparison, and review.
 - 固定輸出覆寫 permits creating or replacing the agreed stable output. It never permits changing a source file.
 - 已授權排程覆寫 permits the same stable replacement during the named recurring task, within the agreed local project and schedule.
+- 固定輸出覆寫 requires one explicit owner confirmation after the task agreement and before any candidate mutation. That confirmation covers the whole run, not every chunk.
 - A request to inspect a file does not authorize a write.
 - A request to update a file authorizes a derived output, not in-place source mutation.
 - A request to schedule must still identify schedule and target before installation.

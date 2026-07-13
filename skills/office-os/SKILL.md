@@ -35,7 +35,9 @@ If an owner decision is missing, ask exactly one short question at a time. Resol
 3. stable output identity;
 4. business rules that cannot be inferred.
 
-Skip questions whose answers are already visible or safely inferable. Once the task is clear, state one compact task agreement covering source, result, output, and QA level. Continue autonomously after that agreement unless a genuine owner decision appears.
+Skip questions whose answers are already visible or safely inferable. Once the task is clear, state one compact task agreement covering source, result, output, and QA level.
+
+For a manual `固定輸出覆寫` run, ask exactly one short confirmation after that agreement and before candidate authoring, adapter mutation, or publishing: whether to create or replace the named stable output. Do not treat silence, a prior turn, or the task agreement itself as confirmation. On yes, continue autonomously through the agreed chunks; on no, leave sources and outputs unchanged. Read-only and preauthorized scheduled work do not need this extra confirmation.
 
 ## 3. Start a bounded run
 
@@ -46,6 +48,12 @@ Resolve the bundled scripts/office_os.py from this SKILL.md and invoke it by abs
     python "<office-os>/scripts/office_os.py" begin --task "<stable task label>" --source "<source>" --intent <intent> --object <object> --permission <permission> --qa <qa> --units <count>
 
 Repeat --source for cross-file work. Omit it only for a genuinely source-free creation. Read the returned `candidate_directory`; it is the run-specific authoring directory under the fixed `PLUGIN_DATA/officecli-candidates` staging root.
+
+For a manual fixed-output run, `begin` returns `awaiting_confirmation`. Ask the one short owner question, then only after an explicit yes unlock that run:
+
+    python "<office-os>/scripts/office_os.py" confirm
+
+Before `confirm`, do not copy a source into the candidate directory, invoke OfficeCLI, record chunk progress, or publish. If the owner declines, explicitly fail the run and retain the existing output.
 
 Keep sources unchanged. Use the stable task label as the task key, publish writable results to a sibling `Office OS Output` folder, and replace the same stable target when that task repeats. That identity is collision-safe: every task key and task-derived output name includes a digest of its normalized label, so punctuation collisions stay distinct while case and whitespace variants remain the same task. Never create timestamped output identities or caller-selected output identities.
 

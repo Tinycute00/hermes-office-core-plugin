@@ -18,7 +18,7 @@ The manager selects OfficeCLI `1.0.135` at source commit `d2d9c60f44537004c3e1f4
 
 The adapter exposes exactly one tool, `officecli`, with one required input: `command: string[]` containing 1 to 128 tokens. Never send a shell command, an alternate argument field, or an extra tool parameter.
 
-Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Each successful `office_os.py begin` reserves and returns one run-specific `candidate_directory` below that root. Before a tool call:
+Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Each successful `office_os.py begin` reserves and returns one run-specific `candidate_directory` below that root. A manual fixed-output run remains `awaiting_confirmation` until the owner explicitly approves the compact task agreement through `office_os.py confirm`; before that transition, do not copy a source, create a candidate, call the adapter, record progress, or publish. Before a tool call after confirmation:
 
 1. fingerprint every source through the Office OS core;
 2. create a new candidate or copy the source into the returned `candidate_directory`;
