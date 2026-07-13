@@ -22,6 +22,7 @@ LAUNCHER = ROOT / "scripts" / "officecli-mcp.cjs"
 JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
 POLICY = ROOT / "scripts" / "officecli-mcp" / "policy.cjs"
 RUNNER = ROOT / "scripts" / "officecli-mcp" / "runner.cjs"
+PATHS = ROOT / "scripts" / "officecli-mcp" / "paths.cjs"
 NODE = shutil.which("node")
 
 
@@ -44,9 +45,10 @@ def load_manager():
 def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
     self_test = (
         "const { runProtocol } = require(process.argv[1]);"
-        "runProtocol({"
+        "let calls=0;runProtocol({"
         "tool:{name:'officecli',description:'test',inputSchema:{type:'object'}},"
         "callTool:async(args)=>{"
+        "calls+=1;if(args.reportCalls)return {calls};"
         "if(args.fail==='policy')return {content:[{type:'text',text:'denied'}],isError:true};"
         "if(args.fail==='internal')throw new Error('boom');"
         "return {content:[{type:'text',text:'ok'}]};}});"
@@ -89,9 +91,18 @@ def run_policy(arguments: dict, data_root: Path) -> dict:  # noqa: DICT_OK
 
 def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     script = (
-        "const runner=require(process.argv[1]);let input='';"
+        "let input='';"
         "process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);"
         "process.stdin.on('end',async()=>{const c=JSON.parse(input);try{"
+        "if(c.nonsettlingKill){const {EventEmitter}=require('node:events');"
+        "const childProcess=require('node:child_process');let launches=0;"
+        "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++launches;"
+        "if(launches===1){child.stdout=new EventEmitter();child.stderr=new EventEmitter();}return child;};"
+        "const runner=require(process.argv[1]);try{await runner.runProcess('fake',[],1,25);"
+        "process.stdout.write(JSON.stringify({error:'settled'}));}catch(error){"
+        "process.stdout.write(JSON.stringify({error:error.message}));}return;}"
+        "const runner=require(process.argv[1]);"
+        "for(const [key,value] of Object.entries(c.inheritedEnvironment||{}))process.env[key]=value;"
         "if(c.constants){process.stdout.write(JSON.stringify(runner.CONSTANTS));return;}"
         "if(c.environment){process.stdout.write(JSON.stringify(runner.childEnvironment()));return;}"
         "const result=await runner.runTool(process.execPath,c.parsed,c.options||{});"
@@ -109,7 +120,7 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
         encoding="utf-8",
         capture_output=True,
         check=False,
-        timeout=15,
+        timeout=2 if configuration.get("nonsettlingKill") else 15,
     )
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
@@ -236,6 +247,36 @@ class OfficeCLICase(unittest.TestCase):
             self.assertIn("checksum mismatch", responses[1]["result"]["content"][0]["text"])
             self.assertFalse(capture.exists())
 
+    def test_runner_child_environment_replaces_all_officecli_case_variants(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            environment = run_runner(
+                {
+                    "environment": True,
+                    "inheritedEnvironment": {
+                        "OFFICECLI_UNTRUSTED": "upper",
+                        "officecli_lower_untrusted": "lower",
+                        "OfficeCli_Mixed_Untrusted": "mixed",
+                        "UNRELATED": "preserved",
+                    },
+                },
+                data_root,
+            )
+        officecli = {
+            key: value
+            for key, value in environment.items()
+            if key.upper().startswith("OFFICECLI_")
+        }
+        self.assertEqual(
+            officecli,
+            {
+                "OFFICECLI_SKIP_UPDATE": "1",
+                "OFFICECLI_NO_AUTO_INSTALL": "1",
+                "OFFICECLI_NO_AUTO_RESIDENT": "1",
+            },
+        )
+        self.assertEqual(environment["UNRELATED"], "preserved")
+
     def test_runner_kills_tree_on_timeout_and_overflow(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
@@ -254,6 +295,7 @@ class OfficeCLICase(unittest.TestCase):
             constants = run_runner({"constants": True}, data_root)
             self.assertEqual(constants["normalTimeoutMs"], 60_000)
             self.assertEqual(constants["screenshotTimeoutMs"], 120_000)
+            self.assertEqual(constants["terminationGraceMs"], 5_000)
             self.assertEqual(constants["streamLimitBytes"], 8 * 1024 * 1024)
             self.assertEqual(constants["pngLimitBytes"], 16 * 1024 * 1024)
             environment = run_runner({"environment": True}, data_root)
@@ -282,6 +324,12 @@ class OfficeCLICase(unittest.TestCase):
                 pid = int(pid_file.read_text(encoding="utf-8"))
                 self.assertFalse(process_exists(pid), f"grandchild {pid} survived {mode}")
 
+    def test_runner_settles_when_process_tree_termination_never_settles(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            result = run_runner({"nonsettlingKill": True}, data_root)
+        self.assertEqual(result["error"], "OfficeCLI command timed out. Process termination did not complete.")
+
     def test_screenshot_success_and_failure_cleanup(self) -> None:
         png = b"\x89PNG\r\n\x1a\n" + b"minimal"
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -293,6 +341,7 @@ class OfficeCLICase(unittest.TestCase):
             fake.write_text(
                 "const fs=require('node:fs');const args=process.argv.slice(2);"
                 "const out=args[args.indexOf('--out')+1];"
+                "if(args.includes('missing'))process.exit(0);"
                 "if(args.includes('fail')){fs.writeFileSync(out,'bad');process.exit(2);}"
                 "fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a6d696e696d616c','hex'));",
                 encoding="utf-8",
@@ -311,6 +360,13 @@ class OfficeCLICase(unittest.TestCase):
                 data_root,
             )
             self.assertTrue(failure["isError"])
+            missing = run_runner(
+                {"parsed": {"argv": [os.fspath(fake), "missing"], "screenshot": True}},
+                data_root,
+            )
+            self.assertTrue(missing["isError"])
+            self.assertNotIn("error", missing)
+            self.assertEqual(missing["content"][0]["text"], "Screenshot processing failed.")
             leftovers = [path for path in candidate_root.rglob("*") if ".officecli-shot-" in path.name]
             self.assertEqual(leftovers, [])
 
@@ -425,6 +481,202 @@ class OfficeCLICase(unittest.TestCase):
                 elif linked.is_symlink():
                     linked.unlink()
 
+    def test_candidate_containment_rejects_hard_links(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            outside = base / "outside.xlsx"
+            outside.write_bytes(b"outside-source")
+            linked = candidate_root / "candidate.xlsx"
+            os.link(outside, linked)
+            before = hashlib.sha256(outside.read_bytes()).hexdigest()
+            result = run_policy(
+                {"command": ["set", os.fspath(linked), "/Sheet1/A1", "--prop", "text=changed"]},
+                data_root,
+            )
+            self.assertIn("error", result)
+            self.assertIn("hard", result["error"].lower())
+            self.assertEqual(hashlib.sha256(outside.read_bytes()).hexdigest(), before)
+
+    def test_candidate_containment_rejects_linked_plugin_data(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            real_data = base / "real-plugin-data"
+            candidate = real_data / "officecli-candidates" / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            linked_data = base / "linked-plugin-data"
+            if os.name == "nt":
+                completed = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", os.fspath(linked_data), os.fspath(real_data)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            else:
+                linked_data.symlink_to(real_data, target_is_directory=True)
+            try:
+                linked_candidate = linked_data / "officecli-candidates" / candidate.name
+                result = run_policy(
+                    {"command": ["validate", os.fspath(linked_candidate)]}, linked_data
+                )
+                self.assertIn("error", result)
+                self.assertIn("link", result["error"].lower())
+            finally:
+                if os.path.lexists(linked_data):
+                    if os.name == "nt":
+                        os.rmdir(linked_data)
+                    else:
+                        linked_data.unlink()
+
+    def test_candidate_containment_rejects_linked_plugin_data_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            real_parent = base / "real-parent"
+            candidate = real_parent / "plugin-data" / "officecli-candidates" / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            linked_parent = base / "linked-parent"
+            if os.name == "nt":
+                completed = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", os.fspath(linked_parent), os.fspath(real_parent)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+            else:
+                linked_parent.symlink_to(real_parent, target_is_directory=True)
+            try:
+                linked_data = linked_parent / "plugin-data"
+                linked_candidate = linked_data / "officecli-candidates" / candidate.name
+                result = run_policy(
+                    {"command": ["validate", os.fspath(linked_candidate)]}, linked_data
+                )
+                self.assertIn("error", result)
+                self.assertIn("link", result["error"].lower())
+            finally:
+                if os.path.lexists(linked_parent):
+                    if os.name == "nt":
+                        os.rmdir(linked_parent)
+                    else:
+                        linked_parent.unlink()
+
+    def test_paths_reject_native_reparse_points_beyond_node_symlinks(self) -> None:
+        script = (
+            "const path=require('node:path');const paths=require(process.argv[1]);"
+            "const target=process.argv[2];const injected=paths.isLinklike(target,"
+            "{isSymbolicLink:()=>false},new Set([path.resolve(target)]));"
+            "const native=paths.windowsReparsePoints([target]).has(path.resolve(target));"
+            "process.stdout.write(JSON.stringify({injected,native}));"
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            regular = base / "regular"
+            regular.mkdir()
+            completed = subprocess.run(
+                [NODE or "node", "-e", script, os.fspath(PATHS), os.fspath(regular)],
+                cwd=ROOT,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(json.loads(completed.stdout)["injected"])
+            if os.name == "nt":
+                outside = base / "outside"
+                outside.mkdir()
+                junction = base / "junction"
+                created = subprocess.run(
+                    ["cmd", "/c", "mklink", "/J", os.fspath(junction), os.fspath(outside)],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(created.returncode, 0, created.stderr)
+                try:
+                    real = subprocess.run(
+                        [NODE or "node", "-e", script, os.fspath(PATHS), os.fspath(junction)],
+                        cwd=ROOT,
+                        text=True,
+                        encoding="utf-8",
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(real.returncode, 0, real.stderr)
+                    self.assertTrue(json.loads(real.stdout)["native"])
+                finally:
+                    if os.path.lexists(junction):
+                        os.rmdir(junction)
+
+    def test_policy_rejects_case_and_option_smuggling_in_get_selector(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            candidate = data_root / "officecli-candidates" / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            selectors = ("selected", "Selected", "SELECTED", "--save=C:/outside.txt")
+            for selector in selectors:
+                with self.subTest(selector=selector):
+                    result = run_policy(
+                        {"command": ["get", os.fspath(candidate), selector]}, data_root
+                    )
+                    self.assertIn("error", result)
+
+    def test_policy_distinguishes_text_from_option_like_values(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            candidate = data_root / "officecli-candidates" / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            commands = (
+                ["view", os.fspath(candidate), "text", "--range", "-o"],
+                ["view", os.fspath(candidate), "text", "--range", "-o=outside"],
+                ["add", os.fspath(candidate), "/", "--from", "-o"],
+                ["add", os.fspath(candidate), "/", "--type", "image", "--after", "-o=outside"],
+                ["move", os.fspath(candidate), "/A1", "--before", "-o"],
+                ["move", os.fspath(candidate), "/A1", "--to", "-o=outside"],
+            )
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertIn("error", run_policy({"command": command}, data_root))
+            allowed = run_policy(
+                {"command": ["query", os.fspath(candidate), "cell", "--find", "-123.45"]},
+                data_root,
+            )
+            self.assertEqual(allowed["argv"][-1], "-123.45")
+            forbidden = run_policy(
+                {"command": ["query", os.fspath(candidate), "cell", "--find", "--"]},
+                data_root,
+            )
+            self.assertIn("error", forbidden)
+
+    def test_policy_rejects_inherited_object_property_option_names(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            candidate = data_root / "officecli-candidates" / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            for option in ("constructor", "toString", "__proto__"):
+                with self.subTest(option=option):
+                    result = run_policy(
+                        {
+                            "command": [
+                                "query",
+                                os.fspath(candidate),
+                                "cell",
+                                option,
+                                "attacker-value",
+                            ]
+                        },
+                        data_root,
+                    )
+                    self.assertIn("error", result)
+
     def test_jsonrpc_lifecycle_errors_notifications_and_recovery(self) -> None:
         messages = [
             {"jsonrpc": "2.0", "id": 1, "method": "ping"},
@@ -472,6 +724,56 @@ class OfficeCLICase(unittest.TestCase):
         self.assertEqual(responses[3]["result"], {})
         self.assertEqual(completed.stderr, b"")
 
+    def test_jsonrpc_rejects_invalid_ids_without_handlers_and_recovers(self) -> None:
+        invalid_call = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "officecli",
+                "arguments": {"fail": "internal"},
+            },
+        }
+        messages = [
+            {"jsonrpc": "2.0", "id": {}, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "id": "init", "method": "initialize", "params": {}},
+            {**invalid_call, "id": {}},
+            {**invalid_call, "id": []},
+            {**invalid_call, "id": True},
+        ]
+        lines = [json.dumps(message).encode() for message in messages]
+        lines.append(
+            b'{"jsonrpc":"2.0","id":1e400,"method":"tools/call",'
+            b'"params":{"name":"officecli","arguments":{"fail":"internal"}}}'
+        )
+        lines.extend(
+            json.dumps(message).encode()
+            for message in (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "officecli",
+                        "arguments": {"reportCalls": True},
+                    },
+                },
+                {"jsonrpc": "2.0", "id": None, "method": "ping"},
+            )
+        )
+        completed = run_jsonrpc(b"\n".join(lines) + b"\n")
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        responses = [json.loads(line) for line in completed.stdout.splitlines()]
+        self.assertEqual(
+            [response.get("id") for response in responses],
+            [None, "init", None, None, None, None, 0, None],
+        )
+        self.assertEqual(responses[1]["result"]["protocolVersion"], "2024-11-05")
+        for response in (responses[0], *responses[2:6]):
+            self.assertEqual(response["error"]["code"], -32600)
+        self.assertEqual(responses[6]["result"], {"calls": 1})
+        self.assertEqual(responses[7]["result"], {})
+        self.assertEqual(completed.stderr, b"")
+
     def test_lock_pins_correct_release(self) -> None:
         lock = json.loads(LOCK.read_text(encoding="utf-8"))
         self.assertEqual(lock["project"], "iOfficeAI/OfficeCLI")
@@ -504,6 +806,7 @@ class OfficeCLICase(unittest.TestCase):
 
     def test_child_environment_contains_only_managed_officecli_keys(self) -> None:
         manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
         with mock.patch.dict(
             os.environ,
             {
@@ -514,7 +817,7 @@ class OfficeCLICase(unittest.TestCase):
             },
             clear=False,
         ):
-            environment = manager.side_effect_free_environment()
+            environment = runtime.side_effect_free_environment()
         officecli = {
             key: value
             for key, value in environment.items()
@@ -532,13 +835,14 @@ class OfficeCLICase(unittest.TestCase):
 
     def test_manager_prunes_only_safe_old_siblings(self) -> None:
         manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
         binary = b"verified-officecli"
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary) / "plugin-data"
-            lock = manager.load_lock()
-            asset = lock["assets"][manager.current_asset_key()]
+            lock = runtime.load_lock()
+            asset = lock["assets"][runtime.current_asset_key()]
             asset["sha256"] = hashlib.sha256(binary).hexdigest()
-            current = manager.managed_binary_path(lock, asset, data_root)
+            current = runtime.managed_binary_path(lock, asset, data_root)
             current.parent.mkdir(parents=True)
             current.write_bytes(binary)
             old = data_root / "runtimes" / "officecli" / "0.9.0"
@@ -547,7 +851,6 @@ class OfficeCLICase(unittest.TestCase):
             sentinel = data_root / "outside-sentinel.bin"
             sentinel.write_bytes(b"outside")
             before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
-            runtime = sys.modules["officecli_runtime"]
             with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(data_root)}):
                 with mock.patch.object(runtime, "load_lock", return_value=lock):
                     first = manager.install_runtime(True)
@@ -558,8 +861,48 @@ class OfficeCLICase(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
 
+    def test_manager_preserves_old_runtime_when_post_install_status_is_unverified(self) -> None:
+        manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            lock = runtime.load_lock()
+            _asset_key, asset = runtime.selected_asset(lock)
+            target = runtime.managed_binary_path(lock, asset, data_root)
+            previous = data_root / "runtimes" / "officecli" / "0.9.0"
+            previous.mkdir(parents=True)
+            (previous / "officecli.bin").write_bytes(b"previous-verified-runtime")
+            initial = {
+                "version": lock["version"],
+                "path": os.fspath(target),
+                "installed": False,
+                "integrity": "missing",
+            }
+            unverified = {**initial, "integrity": "checksum_mismatch"}
+            pruned: list[str] = []
+
+            def download(_url: str, destination: Path) -> None:
+                destination.write_bytes(b"downloaded-runtime")
+
+            with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(data_root)}):
+                with mock.patch.object(runtime, "load_lock", return_value=lock):
+                    with mock.patch.object(runtime, "runtime_status", side_effect=[initial, unverified]):
+                        with mock.patch.object(runtime, "download_asset", side_effect=download):
+                            with mock.patch.object(runtime, "sha256_file", return_value=asset["sha256"]):
+                                with mock.patch.object(runtime, "verify_version", return_value="1.0.135"):
+                                    with mock.patch.object(
+                                        runtime,
+                                        "prune_old_versions",
+                                        side_effect=lambda _version: pruned.append(_version),
+                                    ):
+                                        with self.assertRaises(manager.OfficeCLIManagerError):
+                                            manager.install_runtime(True)
+            self.assertTrue(previous.is_dir())
+            self.assertEqual(pruned, [])
+
     def test_manager_refuses_linked_runtime_paths(self) -> None:
         manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
             data_root = base / "plugin-data"
@@ -584,7 +927,7 @@ class OfficeCLICase(unittest.TestCase):
             try:
                 with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(data_root)}):
                     with self.assertRaises(manager.OfficeCLIManagerError):
-                        manager.prune_old_versions("1.0.135")
+                        runtime.prune_old_versions("1.0.135")
                 self.assertEqual(sentinel.read_bytes(), b"outside")
                 self.assertTrue(current.is_dir())
             finally:
@@ -596,22 +939,26 @@ class OfficeCLICase(unittest.TestCase):
     def test_manager_refuses_every_linked_runtime_ancestor(self) -> None:
         manager = load_manager()
         runtime = sys.modules["officecli_runtime"]
-        lock = manager.load_lock()
+        lock = runtime.load_lock()
         operations = {
             "status": lambda: manager.runtime_status(lock),
-            "prune": lambda: manager.prune_old_versions("1.0.135"),
+            "prune": lambda: runtime.prune_old_versions("1.0.135"),
             "uninstall": manager.uninstall_runtime,
             "install": lambda: manager.install_runtime(True),
         }
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
-            for ancestor in ("plugin-data", "runtimes", "officecli"):
+            for ancestor in ("plugin-data-parent", "plugin-data", "runtimes", "officecli"):
                 for operation_name, operation in operations.items():
                     with self.subTest(ancestor=ancestor, operation=operation_name):
                         case = base / f"{ancestor}-{operation_name}"
                         data_root = case / "plugin-data"
                         outside = case / "outside"
-                        if ancestor == "plugin-data":
+                        if ancestor == "plugin-data-parent":
+                            linked = case / "linked-parent"
+                            data_root = linked / "plugin-data"
+                            version = outside / "plugin-data" / "runtimes" / "officecli" / "0.9.0"
+                        elif ancestor == "plugin-data":
                             linked = data_root
                             version = outside / "runtimes" / "officecli" / "0.9.0"
                         elif ancestor == "runtimes":
@@ -691,19 +1038,60 @@ class OfficeCLICase(unittest.TestCase):
             self.assertEqual(status["version"], "1.0.135")
             self.assertFalse(data_root.exists())
 
+    def test_manager_and_adapter_require_plugin_data_environment(self) -> None:
+        self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
+        environment = os.environ.copy()
+        environment.pop("PLUGIN_DATA", None)
+        environment.pop("CLAUDE_PLUGIN_DATA", None)
+        manager = subprocess.run(
+            [sys.executable, os.fspath(MANAGER), "status"],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(manager.returncode, 2)
+        self.assertIn("PLUGIN_DATA", json.loads(manager.stdout)["error"])
+        adapter = subprocess.run(
+            [NODE or "node", os.fspath(LAUNCHER)],
+            cwd=ROOT,
+            env=environment,
+            input="",
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(adapter.returncode, 2)
+        self.assertIn("PLUGIN_DATA", adapter.stderr)
+
     def test_adapter_rejects_linked_runtime_ancestors_before_checksum(self) -> None:
         self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
         manager = load_manager()
-        lock = manager.load_lock()
-        asset = lock["assets"][manager.current_asset_key()]
+        runtime = sys.modules["officecli_runtime"]
+        lock = runtime.load_lock()
+        asset = lock["assets"][runtime.current_asset_key()]
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
-            for ancestor in ("plugin-data", "runtimes", "officecli"):
+            for ancestor in ("plugin-data-parent", "plugin-data", "runtimes", "officecli"):
                 with self.subTest(ancestor=ancestor):
                     case = base / ancestor
                     data_root = case / "plugin-data"
                     outside = case / "outside"
-                    if ancestor == "plugin-data":
+                    if ancestor == "plugin-data-parent":
+                        linked = case / "linked-parent"
+                        data_root = linked / "plugin-data"
+                        binary = (
+                            outside
+                            / "plugin-data"
+                            / "runtimes"
+                            / "officecli"
+                            / "1.0.135"
+                            / asset["filename"]
+                        )
+                    elif ancestor == "plugin-data":
                         linked = data_root
                         binary = (
                             outside
@@ -758,17 +1146,51 @@ class OfficeCLICase(unittest.TestCase):
                             else:
                                 linked.unlink()
 
+    def test_manager_and_adapter_reject_hard_linked_runtime_binary(self) -> None:
+        self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
+        manager = load_manager()
+        runtime = sys.modules["officecli_runtime"]
+        lock = runtime.load_lock()
+        asset = lock["assets"][runtime.current_asset_key()]
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            outside = Path(temporary) / "outside-officecli.bin"
+            outside.write_bytes(b"outside-runtime")
+            binary = runtime.managed_binary_path(lock, asset, data_root)
+            binary.parent.mkdir(parents=True)
+            os.link(outside, binary)
+            before = hashlib.sha256(outside.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(manager.OfficeCLIManagerError, "hard"):
+                runtime.runtime_status(lock, data_root)
+            environment = os.environ.copy()
+            environment["PLUGIN_DATA"] = os.fspath(data_root)
+            completed = subprocess.run(
+                [NODE or "node", os.fspath(LAUNCHER)],
+                cwd=ROOT,
+                env=environment,
+                input="",
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("hard", completed.stderr.lower())
+            self.assertNotIn("checksum mismatch", completed.stderr.lower())
+            self.assertEqual(hashlib.sha256(outside.read_bytes()).hexdigest(), before)
+
     def test_manager_detects_a_tampered_managed_binary(self) -> None:
         manager = load_manager()
-        lock = manager.load_lock()
+        runtime = sys.modules["officecli_runtime"]
+        lock = runtime.load_lock()
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary)
-            asset_key = manager.current_asset_key()
+            asset_key = runtime.current_asset_key()
             asset = lock["assets"][asset_key]
-            target = manager.managed_binary_path(lock, asset, data_root)
+            target = runtime.managed_binary_path(lock, asset, data_root)
             target.parent.mkdir(parents=True)
             target.write_bytes(b"not-officecli")
-            status = manager.runtime_status(lock, data_root)
+            status = runtime.runtime_status(lock, data_root)
             self.assertFalse(status["installed"])
             self.assertEqual(status["integrity"], "checksum_mismatch")
             self.assertEqual(

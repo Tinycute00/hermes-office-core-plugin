@@ -41,6 +41,11 @@ function text(value, maximum = 4096, label = "Token") {
   if (value.includes("\0") || value === "--" || value.startsWith("@")) throw new PolicyError(`${label} contains a forbidden token.`);
 }
 
+function selector(value) {
+  text(value, 4096, "Selector");
+  if (value.startsWith("-")) throw new PolicyError("Selectors must not be options.");
+}
+
 function fields(value) {
   text(value, 1024, "Fields");
   if (!/^[A-Za-z][A-Za-z0-9_.-]*(,[A-Za-z][A-Za-z0-9_.-]*)*$/.test(value)) throw new PolicyError("Fields must be a safe CSV list.");
@@ -62,16 +67,17 @@ function parseOptions(argv, start, rules) {
   const seen = new Map();
   for (let index = start; index < argv.length; index += 1) {
     const flag = argv[index];
+    if (!Object.hasOwn(rules, flag)) throw new PolicyError(`Option is not allowed: ${flag}`);
     const rule = rules[flag];
-    if (!rule) throw new PolicyError(`Option is not allowed: ${flag}`);
     if (seen.has(flag) && !rule.repeat) throw new PolicyError(`Option may appear once: ${flag}`);
     if (rule.boolean) {
       seen.set(flag, true);
       continue;
     }
     const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) throw new PolicyError(`Option requires a value: ${flag}`);
+    if (value === undefined) throw new PolicyError(`Option requires a value: ${flag}`);
     text(value, rule.maximum || 4096, flag);
+    if (!rule.allowLeadingDash && value.startsWith("-")) throw new PolicyError(`Option requires a value: ${flag}`);
     const normalized = rule.check ? rule.check(value) : undefined;
     if (typeof normalized === "string") argv[index + 1] = normalized;
     const values = seen.get(flag) || [];
@@ -159,9 +165,9 @@ function parseView(argv) {
 function parseMutation(argv) {
   const verb = argv[0];
   if (argv.length < 3) throw new PolicyError(`${verb} requires a DOM path.`);
-  text(argv[2]);
+  selector(argv[2]);
   if (verb === "set") {
-    const seen = parseOptions(argv, 3, { "--prop": { repeat: true, check: property }, "--find": {}, "--replace": {} });
+    const seen = parseOptions(argv, 3, { "--prop": { repeat: true, check: property }, "--find": { allowLeadingDash: true }, "--replace": { allowLeadingDash: true } });
     if (!seen.has("--prop") || seen.has("--find") !== seen.has("--replace")) throw new PolicyError("set requires properties and paired find/replace.");
   } else if (verb === "add") {
     const seen = parseOptions(argv, 3, {
@@ -192,18 +198,18 @@ function parseToolArguments(argumentsValue) {
   if (verb === "validate") {
     if (argv.length !== 2) throw new PolicyError("validate accepts only a file.");
   } else if (verb === "get") {
-    if (argv.length < 3 || argv[2] === "selected") throw new PolicyError("get requires a safe DOM path.");
-    text(argv[2]);
+    if (argv.length < 3 || argv[2].toLowerCase() === "selected") throw new PolicyError("get requires a safe DOM path.");
+    selector(argv[2]);
     parseOptions(argv, 3, { "--depth": { check: (v) => integer(v, 0, 8, "depth") } });
   } else if (verb === "query") {
     if (argv.length < 3) throw new PolicyError("query requires a selector.");
-    text(argv[2]);
-    parseOptions(argv, 3, { "--find": {}, "--compact": { boolean: true }, "--fields": { maximum: 1024, check: fields } });
+    selector(argv[2]);
+    parseOptions(argv, 3, { "--find": { allowLeadingDash: true }, "--compact": { boolean: true }, "--fields": { maximum: 1024, check: fields } });
   } else if (verb === "view") screenshot = parseView(argv);
   else if (["set", "add", "remove", "move"].includes(verb)) parseMutation(argv);
   else {
     if (argv.length !== 4) throw new PolicyError("swap requires two DOM paths.");
-    text(argv[2]); text(argv[3]);
+    selector(argv[2]); selector(argv[3]);
   }
   if (json) argv.push("--json");
   return { argv, screenshot };
