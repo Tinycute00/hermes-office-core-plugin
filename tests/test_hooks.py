@@ -150,6 +150,19 @@ class HookCase(unittest.TestCase):
         self.assertNotIn(os.fspath(skill_path), context)
         self.assertNotIn("Office.md", context)
 
+    def assert_source_free_without_state(self, prompt: str) -> None:
+        result = self.run_hook(self.prompt_payload(prompt))
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_extension_only_prompt_remains_source_free_without_state(self) -> None:
+        self.assert_source_free_without_state("Create a new .xlsx file")
+
+    def test_url_prompt_remains_source_free_without_state(self) -> None:
+        self.assert_source_free_without_state("Review https://example.com/report.xlsx")
+
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
         environment = os.environ.copy()
         environment.pop("PLUGIN_DATA", None)
@@ -227,6 +240,16 @@ class HookCase(unittest.TestCase):
         self.assertIn("remaining_units=4", context)
         self.assertIn("PLUGIN_DATA", context)
         self.assertIn(os.fspath(self.plugin_data), context)
+
+    def test_session_start_without_an_active_run_does_not_create_workspace_state(self) -> None:
+        result = self.run_hook(
+            {
+                "hook_event_name": "SessionStart",
+                "cwd": os.fspath(self.workspace),
+            }
+        )
+        self.assertIsNotNone(result)
+        self.assertFalse(self.plugin_data.exists())
 
     def test_stop_continuation_requires_new_progress_and_is_capped_at_two(self) -> None:
         state_path = self.workspace_data() / "run_state.json"

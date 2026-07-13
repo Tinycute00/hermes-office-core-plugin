@@ -91,12 +91,24 @@ INLINE_CODE_PATTERN = re.compile(
     r"(?<!\w)(" + chr(96) + r"+)(.+?)\1",
     re.DOTALL,
 )
-EXTENSION_PATTERN = re.compile(
-    r"(?<![\w.])[^<>\r\n]*?\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
+URL_PATTERN = re.compile(
+    r"\b(?:https?|ftp|file)://[^\s<>\"']+",
+    re.IGNORECASE,
+)
+OFFICE_EXTENSION_PATTERN = re.compile(
+    r"\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
     re.IGNORECASE,
 )
 LOCAL_PATH_PATTERN = re.compile(
-    r"(?<!\w)(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|/[A-Za-z0-9_.-]+|\\\\[A-Za-z0-9_.-]+)"
+    r"(?<!\w)(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))"
+)
+BARE_OFFICE_FILENAME_PATTERN = re.compile(
+    r"(?<![\w.-])[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
+    re.IGNORECASE,
+)
+QUOTED_OFFICE_FILENAME_PATTERN = re.compile(
+    r"(?:\"[^\"\r\n]+\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b\"|'[^'\r\n]+\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b')",
+    re.IGNORECASE,
 )
 ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
 MAX_DEDUP_KEYS = 128
@@ -191,17 +203,18 @@ def ensure_ordinary_directory(
     return path
 
 
-def ensure_plugin_data_root() -> Path:
-    return ensure_ordinary_directory(
-        plugin_data_root(), "plugin data root", create_parents=True
-    )
-
-
-def workspace_dir(cwd: str | None) -> Path:
+def workspace_dir(cwd: str | None, *, create: bool = True) -> Path:
     canonical = canonical_workspace(cwd)
     workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
+    data_root = plugin_data_root()
+    workspaces = data_root / "workspaces"
+    directory = workspaces / workspace_id
+    if not create:
+        validate_ordinary_ancestors(directory, "workspace state directory")
+        return directory
     workspaces = ensure_ordinary_directory(
-        ensure_plugin_data_root() / "workspaces", "workspace state root"
+        ensure_ordinary_directory(data_root, "plugin data root") / "workspaces",
+        "workspace state root",
     )
     return ensure_ordinary_directory(
         workspaces / workspace_id, "workspace state directory"
@@ -339,14 +352,18 @@ def is_office_prompt(prompt: str) -> bool:
     cleaned = strip_code(prompt)
     if re.search(r"(?<![\w-])\$office-os\b", cleaned, re.IGNORECASE):
         return True
-    if EXTENSION_PATTERN.search(cleaned):
+    if OFFICE_EXTENSION_PATTERN.search(cleaned):
         return True
     return bool(ACTION_PATTERN.search(cleaned) and object_hints(cleaned))
 
 
 def has_named_local_source(prompt: str) -> bool:
-    cleaned = strip_code(prompt)
-    return bool(EXTENSION_PATTERN.search(cleaned) or LOCAL_PATH_PATTERN.search(cleaned))
+    cleaned = URL_PATTERN.sub("", strip_code(prompt))
+    return bool(
+        LOCAL_PATH_PATTERN.search(cleaned)
+        or BARE_OFFICE_FILENAME_PATTERN.search(cleaned)
+        or QUOTED_OFFICE_FILENAME_PATTERN.search(cleaned)
+    )
 
 
 def source_free_intent(prompt: str) -> str:
@@ -440,8 +457,7 @@ def context_output(event: str, context: str) -> dict[str, Any]:
     }
 
 
-def plugin_data_context(directory: Path) -> str:
-    data_root = directory.parents[1]
+def plugin_data_context(data_root: Path) -> str:
     return (
         f" Authoritative Office OS PLUGIN_DATA is {os.fspath(data_root)}. "
         "Set PLUGIN_DATA to exactly this path for every office_os.py command; "
@@ -461,7 +477,7 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
         "Office OS is available as $office-os for local Excel, Word, "
         "PowerPoint, PDF, and cross-file work. Reclassify the current turn; "
         "the first visible Office response must begin with an intent classification; named-source replies use the Chinese intent envelope."
-        + plugin_data_context(directory)
+        + plugin_data_context(directory.parents[1])
     )
     if active:
         context += (
@@ -473,18 +489,20 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
     emit(context_output("SessionStart", context))
 
 
-def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
+def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
     if not prompt or not is_office_prompt(prompt):
-        return
-    if not remember_prompt(directory, payload, prompt):
         return
     if not has_named_local_source(prompt):
         emit(
             context_output(
-                "UserPromptSubmit", source_free_intake_context(prompt) + plugin_data_context(directory)
+                "UserPromptSubmit",
+                source_free_intake_context(prompt) + plugin_data_context(plugin_data_root()),
             )
         )
+        return
+    directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
+    if not remember_prompt(directory, payload, prompt):
         return
     plugin_root = Path(
         os.environ.get("PLUGIN_ROOT")
@@ -514,7 +532,7 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         f"{', '.join(os.fspath(reference) for reference in references)}; "
         "then continue under normal Office routing.\n"
         "</office-os-intake>"
-        + plugin_data_context(directory)
+        + plugin_data_context(directory.parents[1])
     )
     emit(context_output("UserPromptSubmit", context))
 
@@ -570,12 +588,15 @@ def main() -> int:
     payload = read_input()
     event = str(payload.get("hook_event_name") or "")
     try:
-        directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
         if event == "SessionStart":
+            directory = workspace_dir(
+                str(payload.get("cwd") or os.getcwd()), create=False
+            )
             handle_session_start(payload, directory)
         elif event == "UserPromptSubmit":
-            handle_user_prompt(payload, directory)
+            handle_user_prompt(payload)
         elif event == "Stop":
+            directory = workspace_dir(str(payload.get("cwd") or os.getcwd()))
             handle_stop(payload, directory)
         elif event:
             emit({})
