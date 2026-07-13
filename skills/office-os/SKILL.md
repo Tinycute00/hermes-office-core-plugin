@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "Source-less Office intake: first visible assistant message MUST start 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]; fourth field must be 檢查, not 品質 or 驗證; then at most one short source question. Do not inspect or alter Office data until a local source path or folder is supplied. Use for Excel (.xlsx), Word (.docx), PowerPoint (.pptx), PDF, and office lookup, analysis, review, creation, updates, integration, or schedules."
+description: "No source yet: FIRST visible reply MUST start 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]; use 檢查, never 品質/驗證; then ask one source-path question. No preamble or Office data work. Excel, Word, PowerPoint, PDF workflows."
 ---
 
 # Office OS

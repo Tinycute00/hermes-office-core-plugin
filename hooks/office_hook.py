@@ -389,14 +389,12 @@ def source_free_intake_context(prompt: str) -> str:
     question = f"{object_name} 來源檔或資料夾路徑是什麼？"
     return (
         "<office-os-source-free-intake>\n"
-        "SOURCE-FREE OFFICE INTAKE IS ACTIVE.\n\n"
-        "MANDATORY ORDER:\n"
-        "1. First user-visible assistant message this turn MUST be exactly:\n"
+        "FIRST USER-VISIBLE RESPONSE MUST BE EXACTLY:\n"
         f"`{envelope}\n{question}`\n"
-        "No greeting, preamble, plan, acknowledgement, skill announcement, status, or other text may occur before it.\n\n"
-        "2. Do not inspect or alter Office data. Do not call `office_os.py`, OfficeCLI, or an MCP tool; "
+        "No text may occur before it.\n\n"
+        "Do not inspect or alter Office data. Do not call `office_os.py`, OfficeCLI, or an MCP tool; "
         "do not create workspace state, a candidate, an output, or a schedule. Wait for the user to name a local source path or folder.\n\n"
-        "3. Loading this skill to honor an explicit $office-os invocation is allowed, but do not load workflow references "
+        "Loading this skill to honor an explicit $office-os invocation is allowed, but do not load workflow references "
         "or inspect Office data until the source is named.\n"
         "</office-os-source-free-intake>"
     )

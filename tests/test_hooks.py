@@ -131,7 +131,7 @@ class HookCase(unittest.TestCase):
 
         self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
         self.assertIn(
-            "First user-visible assistant message this turn MUST be exactly:", context
+            "FIRST USER-VISIBLE RESPONSE MUST BE EXACTLY:", context
         )
         self.assertIn(
             "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
