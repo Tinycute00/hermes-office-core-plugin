@@ -1112,6 +1112,56 @@ class CoreCase(unittest.TestCase):
         self.assertTrue(changed["needs_run"])
         self.assertTrue(target.exists())
 
+    def test_cross_file_output_target_is_independent_of_source_order(self) -> None:
+        workbook = self.workspace / "workbook.xlsx"
+        document = self.workspace / "document.docx"
+        write_xlsx(workbook, "workbook")
+        write_docx(document, "document")
+        task = "跨檔案固定輸出"
+
+        first, _ = self.run_core(
+            "needs-run",
+            "--source",
+            os.fspath(workbook),
+            "--source",
+            os.fspath(document),
+            "--task",
+            task,
+            "--extension",
+            ".xlsx",
+        )
+        second, _ = self.run_core(
+            "needs-run",
+            "--source",
+            os.fspath(document),
+            "--source",
+            os.fspath(workbook),
+            "--task",
+            task,
+            "--extension",
+            ".xlsx",
+        )
+        self.assertEqual(first["target"], second["target"])
+
+        state = self.begin_publish_run(task, (workbook, document), mode="scheduled")
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "combined")
+        published, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(document),
+            "--source",
+            os.fspath(workbook),
+            "--task",
+            task,
+            "--mode",
+            "scheduled",
+        )
+        self.assertEqual(first["target"], published["target"])
+        self.run_core("complete", "--summary", "published")
+
     def test_needs_run_does_not_create_an_output_directory(self) -> None:
         source = self.workspace / "source.xlsx"
         write_xlsx(source, "source")

@@ -1799,7 +1799,7 @@ def command_needs_run(args: argparse.Namespace) -> int:
     directory = get_workspace_dir(args.cwd)
     sources = [canonical_path(item) for item in args.source]
     source_fingerprints = fingerprint_sources(sources)
-    primary_source = sources[0]
+    primary_source = Path(source_fingerprints[0].path)
     task_key = stable_task_key(args.task)
     candidate_suffix = args.extension.lower()
     if candidate_suffix not in READ_WRITE_EXTENSIONS:
@@ -1851,7 +1851,7 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
         raise OfficeOSError(
             "A source differs from the task-start fingerprint; candidate was not published."
         )
-    primary_source = sources[0] if sources else None
+    primary_source = Path(sources_before[0].path) if sources_before else None
     data_root = ensure_plugin_data_root()
     try:
         candidate = validated_run_candidate(data_root, active_run, candidate_input)
