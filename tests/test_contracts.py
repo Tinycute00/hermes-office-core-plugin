@@ -100,6 +100,25 @@ class ContractCase(unittest.TestCase):
         self.assertIn("Never run a core or manager command without that exact value", text)
         self.assertNotIn("Create the candidate in the target directory", text)
 
+    def test_intake_final_reply_contract_is_shared(self) -> None:
+        texts = (
+            (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
+                encoding="utf-8"
+            ),
+            (ROOT / "skills" / "office-os" / "references" / "Agent.md").read_text(
+                encoding="utf-8"
+            ),
+        )
+        for text in texts:
+            for marker in (
+                "exactly one final assistant message",
+                "first line is the intent envelope",
+                "exactly one short question after the envelope",
+                "same final message",
+                "no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message",
+            ):
+                self.assertIn(marker, text)
+
     def test_workflow_has_no_unbounded_or_automatic_policy(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
             encoding="utf-8"

@@ -108,6 +108,19 @@ class HookCase(unittest.TestCase):
         self.assertIn(os.fspath(self.plugin_data), context)
         self.assertIsNone(self.run_hook(payload))
 
+    def test_office_prompt_requires_one_final_envelope_reply(self) -> None:
+        result = self.run_hook(self.prompt_payload("每週更新 budget.xlsx"))
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        for marker in (
+            "exactly one final assistant message",
+            "first line must be the intent envelope",
+            "exactly one short question after the envelope",
+            "same final message",
+            "no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message",
+        ):
+            self.assertIn(marker, context)
+
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
         environment = os.environ.copy()
         environment.pop("PLUGIN_DATA", None)

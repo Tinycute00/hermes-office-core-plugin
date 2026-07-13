@@ -431,8 +431,10 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
     ]
     context = (
         "Current-turn Office workflow detected. Invoke $office-os. "
-        "Before any other visible text, output the intent envelope in this exact shape: "
+        "Return this intake as exactly one final assistant message: its first line must be the intent envelope in this exact shape: "
         "意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>. "
+        "If clarification is needed, put exactly one short question after the envelope in that same final message. "
+        "Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply. "
         "Classify this turn only; prior edit or schedule permission does not carry over. "
         f"Read {skill_path} and the relevant references "
         f"{', '.join(os.fspath(reference) for reference in references)}."

@@ -9,7 +9,7 @@ Turn an ordinary office request into a bounded, inspectable workflow. Keep the u
 
 ## 1. Classify the current turn
 
-Make the first user-visible line of every triggered Office turn exactly:
+Return each Office intake as exactly one final assistant message. Its first line is the intent envelope:
 
     意圖：<意圖>｜物件：<物件>｜權限：<權限>｜檢查：<檢查>
 
@@ -19,6 +19,8 @@ Choose one value per dimension:
 - 物件: Excel, Word, PowerPoint, PDF, 跨檔案
 - 權限: 唯讀, 固定輸出覆寫, 已授權排程覆寫
 - 檢查: 快速, 加強, 完整
+
+If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 

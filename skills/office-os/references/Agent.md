@@ -4,7 +4,7 @@ This file owns the base behavior of Office OS. Object files own format-specific 
 
 ## Intent envelope
 
-Emit the intent envelope as the first visible line before greetings, plans, caveats, or tool activity summaries.
+For an Office intake, return exactly one final assistant message. Its first line is the intent envelope, before greetings, plans, caveats, or tool activity summaries. If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
 | Dimension | Values | Decision rule |
 | --- | --- | --- |
