@@ -396,6 +396,16 @@ class OfficeCLICase(unittest.TestCase):
             "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
             "0000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082"
         )
+        invalid_idat = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000349444154789c007edcb25c0000000049454e44ae426082"
+        )
+        malformed_pngs = {
+            "invalid-ihdr": "89504e470d0a1a0a0000000d49484452000000010000000103000000004daeaa440000000949444154789c630000000100015eff7df90000000049454e44ae426082",
+            "interlaced": "89504e470d0a1a0a0000000d49484452000000010000000108060000016812f41f0000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082",
+            "invalid-scanline": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000b49444154789c6365000200001e0006bca97c690000000049454e44ae426082",
+            "wrong-length": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000c49444154789c63606060000000040001f61738550000000049454e44ae426082",
+        }
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
             data_root = base / "plugin-data"
@@ -409,6 +419,12 @@ class OfficeCLICase(unittest.TestCase):
                 "if(args.includes('fail')){fs.writeFileSync(out,'bad');process.exit(2);}"
                 "if(args.includes('signature')){fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a','hex'));process.exit(0);}"
                 "if(args.includes('truncated')){fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a0000000d49484452','hex'));process.exit(0);}"
+                f"if(args.includes('corrupt-crc')){{const png=Buffer.from('{png.hex()}','hex');png[29]^=1;fs.writeFileSync(out,png);process.exit(0);}}"
+                f"if(args.includes('invalid-idat')){{fs.writeFileSync(out,Buffer.from('{invalid_idat.hex()}','hex'));process.exit(0);}}"
+                f"if(args.includes('invalid-ihdr')){{fs.writeFileSync(out,Buffer.from('{malformed_pngs['invalid-ihdr']}','hex'));process.exit(0);}}"
+                f"if(args.includes('interlaced')){{fs.writeFileSync(out,Buffer.from('{malformed_pngs['interlaced']}','hex'));process.exit(0);}}"
+                f"if(args.includes('invalid-scanline')){{fs.writeFileSync(out,Buffer.from('{malformed_pngs['invalid-scanline']}','hex'));process.exit(0);}}"
+                f"if(args.includes('wrong-length')){{fs.writeFileSync(out,Buffer.from('{malformed_pngs['wrong-length']}','hex'));process.exit(0);}}"
                 f"fs.writeFileSync(out,Buffer.from('{png.hex()}','hex'));",
                 encoding="utf-8",
             )
@@ -433,7 +449,16 @@ class OfficeCLICase(unittest.TestCase):
             self.assertTrue(missing["isError"])
             self.assertNotIn("error", missing)
             self.assertEqual(missing["content"][0]["text"], "Screenshot processing failed.")
-            for mode in ("signature", "truncated"):
+            for mode in (
+                "signature",
+                "truncated",
+                "corrupt-crc",
+                "invalid-idat",
+                "invalid-ihdr",
+                "interlaced",
+                "invalid-scanline",
+                "wrong-length",
+            ):
                 with self.subTest(mode=mode):
                     malformed = run_runner(
                         {"parsed": {"argv": [os.fspath(fake), mode], "screenshot": True}},
@@ -493,6 +518,23 @@ class OfficeCLICase(unittest.TestCase):
             self.assertTrue(result["isError"])
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertEqual(len(list(candidate_root.iterdir())), 33)
+            marker = base / "postflight-child-ran"
+            blocked = run_runner(
+                {
+                    "parsed": {
+                        "argv": [
+                            "-e",
+                            "require('node:fs').writeFileSync(process.argv[1],'ran')",
+                            os.fspath(marker),
+                        ],
+                        "screenshot": False,
+                    }
+                },
+                data_root,
+            )
+            self.assertTrue(blocked["isError"])
+            self.assertIn("candidate limits", blocked["content"][0]["text"])
+            self.assertFalse(marker.exists())
 
     def test_candidate_run_reservation_fails_closed_when_quota_is_exhausted(self) -> None:
         candidates, runs = load_candidate_modules()

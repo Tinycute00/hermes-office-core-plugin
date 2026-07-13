@@ -5,6 +5,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { inflateSync } = require("node:zlib");
 const { candidateRoot, isContained, isLinklike, linkedAncestor, windowsReparsePoints } = require("./paths.cjs");
 
 const CONSTANTS = Object.freeze({
@@ -20,6 +21,19 @@ const MANAGED_ENV = Object.freeze({
   OFFICECLI_NO_AUTO_RESIDENT: "1",
 });
 const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
+const PNG_CRC_TABLE = Uint32Array.from({ length: 256 }, (_value, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) value = (value >>> 1) ^ (value & 1 ? 0xedb88320 : 0);
+  return value;
+});
+const PNG_CHANNELS = Object.freeze({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 });
+const PNG_BIT_DEPTHS = Object.freeze({
+  0: new Set([1, 2, 4, 8, 16]),
+  2: new Set([8, 16]),
+  3: new Set([1, 2, 4, 8]),
+  4: new Set([8, 16]),
+  6: new Set([8, 16]),
+});
 const PLATFORM_ENV_KEYS = new Set(process.platform === "win32"
   ? ["PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"]
   : ["PATH", "TMPDIR", "TMP", "TEMP"]);
@@ -82,6 +96,12 @@ function assertCandidateQuota() {
   if (usage.files > MAX_CANDIDATE_FILES || usage.bytes > MAX_CANDIDATE_BYTES) {
     throw new RunnerError("Managed OfficeCLI candidate limits are exhausted.");
   }
+}
+
+function pngCrc(data) {
+  let value = 0xffffffff;
+  for (const byte of data) value = PNG_CRC_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+  return (value ^ 0xffffffff) >>> 0;
 }
 
 function killTree(child, timeoutMs) {
@@ -230,24 +250,58 @@ function assertPng(output) {
   }
   let offset = PNG_SIGNATURE.length;
   let header = false;
-  let imageData = false;
+  let scanlineBytes = 0;
+  let expectedBytes = 0;
+  const imageData = [];
   while (offset < data.length) {
     if (data.length - offset < 12) throw new RunnerError("Screenshot output is not a PNG.");
     const length = data.readUInt32BE(offset);
     const end = offset + length + 12;
     if (end > data.length) throw new RunnerError("Screenshot output is not a PNG.");
     const type = data.toString("ascii", offset + 4, offset + 8);
+    if (pngCrc(data.subarray(offset + 4, end - 4)) !== data.readUInt32BE(end - 4)) {
+      throw new RunnerError("Screenshot output is not a PNG.");
+    }
     if (!header) {
-      if (type !== "IHDR" || length !== 13 || data.readUInt32BE(offset + 8) === 0 || data.readUInt32BE(offset + 12) === 0) {
+      if (type !== "IHDR" || length !== 13) throw new RunnerError("Screenshot output is not a PNG.");
+      const width = data.readUInt32BE(offset + 8);
+      const height = data.readUInt32BE(offset + 12);
+      const bitDepth = data[offset + 16];
+      const colorType = data[offset + 17];
+      const channels = PNG_CHANNELS[colorType];
+      if (
+        width === 0
+        || height === 0
+        || !channels
+        || !PNG_BIT_DEPTHS[colorType].has(bitDepth)
+        || data[offset + 18] !== 0
+        || data[offset + 19] !== 0
+        || data[offset + 20] !== 0
+      ) {
+        throw new RunnerError("Screenshot output is not a PNG.");
+      }
+      scanlineBytes = Math.ceil((width * channels * bitDepth) / 8) + 1;
+      expectedBytes = scanlineBytes * height;
+      if (!Number.isSafeInteger(expectedBytes) || expectedBytes > CONSTANTS.pngLimitBytes) {
         throw new RunnerError("Screenshot output is not a PNG.");
       }
       header = true;
     } else if (type === "IHDR") {
       throw new RunnerError("Screenshot output is not a PNG.");
     }
-    if (type === "IDAT" && length > 0) imageData = true;
+    if (type === "IDAT" && length > 0) imageData.push(data.subarray(offset + 8, end - 4));
     if (type === "IEND") {
-      if (length !== 0 || !imageData || end !== data.length) throw new RunnerError("Screenshot output is not a PNG.");
+      if (length !== 0 || imageData.length === 0 || end !== data.length) throw new RunnerError("Screenshot output is not a PNG.");
+      let decoded;
+      try {
+        decoded = inflateSync(Buffer.concat(imageData), { maxOutputLength: expectedBytes });
+      } catch {
+        throw new RunnerError("Screenshot output is not a PNG.");
+      }
+      if (decoded.length !== expectedBytes) throw new RunnerError("Screenshot output is not a PNG.");
+      for (let scanline = 0; scanline < decoded.length; scanline += scanlineBytes) {
+        if (decoded[scanline] > 4) throw new RunnerError("Screenshot output is not a PNG.");
+      }
       return data;
     }
     offset = end;
