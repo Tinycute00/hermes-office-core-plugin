@@ -122,6 +122,58 @@ def write_pptx_fixture(path: Path) -> None:
     )
 
 
+def write_relationship_ordered_pptx_fixture(path: Path) -> None:
+    drawing = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    presentation = "http://schemas.openxmlformats.org/presentationml/2006/main"
+    relationships = "http://schemas.openxmlformats.org/package/2006/relationships"
+    office_relationships = (
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    )
+
+    def slide(title: str, body: str) -> str:
+        return (
+            f'<p:sld xmlns:p="{presentation}" xmlns:a="{drawing}"><p:cSld><p:spTree>'
+            f'<p:sp><p:txBody><a:p><a:r><a:t>{title}</a:t></a:r></a:p>'
+            f'<a:p><a:r><a:t>{body}</a:t></a:r></a:p></p:txBody></p:sp>'
+            "</p:spTree></p:cSld></p:sld>"
+        )
+
+    def notes(text: str) -> str:
+        return f'<p:notes xmlns:p="{presentation}" xmlns:a="{drawing}"><a:t>{text}</a:t></p:notes>'
+
+    write_zip(
+        path,
+        {
+            "ppt/presentation.xml": (
+                f'<p:presentation xmlns:p="{presentation}" xmlns:r="{office_relationships}">'
+                '<p:sldIdLst><p:sldId id="256" r:id="rId2"/>'
+                '<p:sldId id="257" r:id="rId1"/></p:sldIdLst></p:presentation>'
+            ),
+            "ppt/_rels/presentation.xml.rels": (
+                f'<Relationships xmlns="{relationships}">'
+                f'<Relationship Id="rId1" Type="{office_relationships}/slide" '
+                'Target="slides/slide1.xml"/>'
+                f'<Relationship Id="rId2" Type="{office_relationships}/slide" '
+                'Target="slides/slide2.xml"/></Relationships>'
+            ),
+            "ppt/slides/slide1.xml": slide("One title", "One body"),
+            "ppt/slides/_rels/slide1.xml.rels": (
+                f'<Relationships xmlns="{relationships}">'
+                f'<Relationship Id="rId9" Type="{office_relationships}/notesSlide" '
+                'Target="../notesSlides/notesSlide2.xml"/></Relationships>'
+            ),
+            "ppt/slides/slide2.xml": slide("Two title", "Two body"),
+            "ppt/slides/_rels/slide2.xml.rels": (
+                f'<Relationships xmlns="{relationships}">'
+                f'<Relationship Id="rId8" Type="{office_relationships}/notesSlide" '
+                'Target="../notesSlides/notesSlide1.xml"/></Relationships>'
+            ),
+            "ppt/notesSlides/notesSlide1.xml": notes("Two note"),
+            "ppt/notesSlides/notesSlide2.xml": notes("One note"),
+        },
+    )
+
+
 def write_xlsx_fixture(path: Path) -> None:
     spreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     relationships = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -206,6 +258,30 @@ class OfficeDocumentIndexCase(unittest.TestCase):
             ],
         )
 
+    def test_pptx_follows_presentation_order_and_notes_relationships(self) -> None:
+        presentation = self.base / "relationship-ordered.pptx"
+        write_relationship_ordered_pptx_fixture(presentation)
+
+        leaf = load_document_index_module()
+
+        self.assertEqual(
+            leaf.extract_pptx(presentation, permissive_limits(leaf)),
+            [
+                expected_chunk(
+                    0,
+                    "slide=2;shape-tree=all",
+                    "Two title",
+                    "Two title\nTwo body\n\nNotes:\nTwo note",
+                ),
+                expected_chunk(
+                    1,
+                    "slide=1;shape-tree=all",
+                    "One title",
+                    "One title\nOne body\n\nNotes:\nOne note",
+                ),
+            ],
+        )
+
     def test_docx_preserves_semantic_sections_tables_and_auxiliary_parts(self) -> None:
         document = self.base / "semantic.docx"
         write_docx_fixture(document)
@@ -227,6 +303,63 @@ class OfficeDocumentIndexCase(unittest.TestCase):
                 expected_chunk(4, "part=word/header10.xml", "header10", "Header ten"),
             ],
         )
+
+    def test_docx_splits_an_oversized_paragraph_to_the_character_limit(self) -> None:
+        document = self.base / "oversized-paragraph.docx"
+        word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        paragraph = "x" * 12_001
+        write_zip(
+            document,
+            {
+                "word/document.xml": (
+                    f'<w:document xmlns:w="{word}"><w:body><w:p><w:r><w:t>'
+                    f"{paragraph}"
+                    "</w:t></w:r></w:p></w:body></w:document>"
+                )
+            },
+        )
+
+        leaf = load_document_index_module()
+        chunks = leaf.extract_docx(document, permissive_limits(leaf))
+
+        self.assertEqual(
+            chunks,
+            [
+                expected_chunk(
+                    0,
+                    "heading=Document;part=1",
+                    "Document",
+                    "x" * 12_000,
+                ),
+                expected_chunk(1, "heading=Document;part=2", "Document", "x"),
+            ],
+        )
+        self.assertTrue(all(len(item["text"]) <= 12_000 for item in chunks))
+
+    def test_split_text_chunks_counts_paragraph_separators_against_the_limit(self) -> None:
+        leaf = load_document_index_module()
+
+        chunks = leaf.split_text_chunks(
+            "aaaaa\n\nbbbbb\n\nccc",
+            "heading=Document",
+            "Document",
+            0,
+            max_chars=10,
+        )
+
+        self.assertEqual(
+            chunks,
+            [
+                expected_chunk(0, "heading=Document;part=1", "Document", "aaaaa"),
+                expected_chunk(
+                    1,
+                    "heading=Document;part=2",
+                    "Document",
+                    "bbbbb\n\nccc",
+                ),
+            ],
+        )
+        self.assertTrue(all(len(item["text"]) <= 10 for item in chunks))
 
     def test_xlsx_resolves_relationships_and_shared_strings(self) -> None:
         workbook = self.base / "relationships.xlsx"

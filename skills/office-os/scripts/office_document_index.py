@@ -10,6 +10,7 @@ from typing import Any
 import xml.etree.ElementTree as ET
 import zipfile
 
+from office_openxml import relationship_target, relationship_types
 from office_openxml_index import IndexPackageLimitError, IndexPackageLimits
 from office_openxml_index import open_index_package
 
@@ -68,7 +69,32 @@ def split_text_chunks(
     ordinal = start_ordinal
     part = 1
     for paragraph in paragraphs or [text.strip()]:
-        if current and current_length + len(paragraph) > max_chars:
+        while len(paragraph) > max_chars:
+            if current:
+                results.append(
+                    chunk(
+                        ordinal,
+                        f"{locator_prefix};part={part}",
+                        heading,
+                        "\n\n".join(current),
+                    )
+                )
+                ordinal += 1
+                part += 1
+                current = []
+                current_length = 0
+            results.append(
+                chunk(
+                    ordinal,
+                    f"{locator_prefix};part={part}",
+                    heading,
+                    paragraph[:max_chars],
+                )
+            )
+            ordinal += 1
+            part += 1
+            paragraph = paragraph[max_chars:]
+        if current and current_length + 2 + len(paragraph) > max_chars:
             results.append(
                 chunk(
                     ordinal,
@@ -82,8 +108,8 @@ def split_text_chunks(
             current = []
             current_length = 0
         if paragraph:
+            current_length += (2 if current else 0) + len(paragraph)
             current.append(paragraph)
-            current_length += len(paragraph)
     if current:
         results.append(
             chunk(
@@ -185,14 +211,41 @@ def extract_pptx(path: Path, limits: IndexPackageLimits) -> list[dict[str, Any]]
     try:
         with open_index_package(path, limits) as package:
             names = set(package.namelist())
-            slide_parts = sorted(
-                [
-                    name
-                    for name in names
-                    if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
-                ],
-                key=natural_part_key,
-            )
+            presentation_part = "ppt/presentation.xml"
+            has_presentation_part = presentation_part in names
+            if has_presentation_part:
+                presentation_root = ET.fromstring(package.read(presentation_part))
+                slide_relationships = relationship_map(
+                    package,
+                    presentation_part,
+                    relationship_types("slide"),
+                )
+                slide_parts: list[str] = []
+                seen_slide_parts: set[str] = set()
+                for node in presentation_root.iter():
+                    if local_name(node.tag) != "sldId":
+                        continue
+                    relation_id = next(
+                        (
+                            value
+                            for key, value in node.attrib.items()
+                            if key.startswith("{") and local_name(key) == "id"
+                        ),
+                        "",
+                    )
+                    part = slide_relationships.get(relation_id, "")
+                    if part and part in names and part not in seen_slide_parts:
+                        slide_parts.append(part)
+                        seen_slide_parts.add(part)
+            else:
+                slide_parts = sorted(
+                    [
+                        name
+                        for name in names
+                        if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+                    ],
+                    key=natural_part_key,
+                )
             for ordinal, part in enumerate(slide_parts):
                 number_match = re.search(r"(\d+)", PurePosixPath(part).stem)
                 slide_number = int(number_match.group(1)) if number_match else ordinal + 1
@@ -202,8 +255,23 @@ def extract_pptx(path: Path, limits: IndexPackageLimits) -> list[dict[str, Any]]
                     for node in slide_root.iter()
                     if local_name(node.tag) == "t" and (node.text or "").strip()
                 ]
-                notes_part = f"ppt/notesSlides/notesSlide{slide_number}.xml"
                 notes_texts: list[str] = []
+                notes_part = next(
+                    (
+                        target
+                        for target in relationship_map(
+                            package,
+                            part,
+                            relationship_types("notesSlide"),
+                        ).values()
+                        if target in names
+                    ),
+                    (
+                        ""
+                        if has_presentation_part
+                        else f"ppt/notesSlides/notesSlide{slide_number}.xml"
+                    ),
+                )
                 if notes_part in names:
                     notes_root = ET.fromstring(package.read(notes_part))
                     notes_texts = [
@@ -244,7 +312,11 @@ def read_shared_strings(package: zipfile.ZipFile) -> list[str]:
     ]
 
 
-def relationship_map(package: zipfile.ZipFile, part: str) -> dict[str, str]:
+def relationship_map(
+    package: zipfile.ZipFile,
+    part: str,
+    expected_types: frozenset[str] | None = None,
+) -> dict[str, str]:
     pure = PurePosixPath(part)
     relationship_part = str(pure.parent / "_rels" / f"{pure.name}.rels")
     if relationship_part not in package.namelist():
@@ -254,13 +326,12 @@ def relationship_map(package: zipfile.ZipFile, part: str) -> dict[str, str]:
     for node in root:
         if local_name(node.tag) != "Relationship":
             continue
+        if expected_types is not None and node.attrib.get("Type") not in expected_types:
+            continue
         relation_id = node.attrib.get("Id", "")
         target = node.attrib.get("Target", "")
-        if target.startswith("/"):
-            normalized = target.lstrip("/")
-        else:
-            normalized = str(PurePosixPath(pure.parent, target))
-        relationships[relation_id] = str(PurePosixPath(normalized))
+        if relation_id and target:
+            relationships[relation_id] = relationship_target(relationship_part, target)
     return relationships
 
 
