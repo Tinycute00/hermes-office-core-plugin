@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "For Office prompts without a named local source path or folder: before tools/references, send exactly one final assistant reply with a Chinese intent envelope on the first line and at most one short source question. Then orchestrate local-first office workflows across Excel (.xlsx), Word (.docx), PowerPoint (.pptx), and read-only PDF files. Use for natural-language requests to find, analyze, review, create, update, integrate, or schedule recurring work involving spreadsheets, documents, slides, PDFs, or cross-file data; trigger on Office file paths and ordinary terms such as Excel, Word, PowerPoint, PDF, workbook, document, presentation, 試算表, 文件, 簡報, 報表, 對帳, 彙整, 更新, or recurring office tasks."
+description: "未提供本機 Office 來源時：最終唯一回覆第一行必為意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>；後面最多一題來源問題；之前不可使用工具、讀檔或 reference。用於 Excel (.xlsx)、Word (.docx)、PowerPoint (.pptx)、PDF，以及查找、分析、檢查、建立、更新、整合、排程等辦公任務。"
 ---
 
 # Office OS

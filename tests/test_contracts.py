@@ -84,14 +84,13 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "For Office prompts without a named local source path or folder: "
-                "before tools/references, send exactly one final assistant reply"
+                "未提供本機 Office 來源時：最終唯一回覆第一行必為"
             ),
             description,
         )
-        self.assertIn("Chinese intent envelope on the first line", description)
-        self.assertIn("at most one short source question", description)
-        self.assertIn("before tools/references", description)
+        self.assertIn("意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>", description)
+        self.assertIn("最多一題來源問題", description)
+        self.assertIn("不可使用工具、讀檔或 reference", description)
 
     def test_office_workflow_policy_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
