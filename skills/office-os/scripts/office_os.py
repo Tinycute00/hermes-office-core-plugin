@@ -23,17 +23,26 @@ import re
 import shutil
 import sqlite3
 import sys
-import tempfile
 import time
 from typing import Any, Iterable, Iterator, Sequence
+import unicodedata
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 
 from office_candidates import CandidateCleanupResult, CandidateLifecycleError
 from office_candidates import MAX_CANDIDATE_AGE_SECONDS
+from office_candidates import is_linklike
 from office_candidates import prune_managed_candidates
 from office_candidates import remove_managed_candidate
+from office_candidate_runs import active_run_candidate_paths
+from office_candidate_runs import remove_candidate_directory
+from office_candidate_runs import reserve_candidate_directory
+from office_candidate_runs import validated_run_candidate
+from office_openxml import OpenXMLValidationError, validate_openxml
+from office_state import StateLeafError, ensure_private_state_leaf
+from office_state import open_private_state_leaf, unlink_private_state_leaf
+from office_state import validate_private_state_leaf
 
 
 def configure_stdio() -> None:
@@ -62,6 +71,8 @@ MAX_PUBLISH_RECORDS = 256
 MAX_FULL_TEXT_ROOTS = 32
 MAX_PACKAGE_MEMBERS = 10_000
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_QUERY_RESULTS = 100
+MAX_QUERY_TEXT_CHARS = 8_000
 LOCK_STALE_SECONDS = 6 * 60 * 60
 TEMP_PREFIX = ".office-os-"
 FULL_TEXT_ROOTS_SETTING = "full_text_roots"
@@ -69,10 +80,55 @@ SENSITIVE_PATTERN = re.compile(
     r"confidential|restricted|secret|internal[ -]?only|機密|密件|限閱|內部限定",
     re.IGNORECASE,
 )
+ACTIVE_RUN_STATUSES = {
+    "grounding",
+    "agreed",
+    "executing",
+    "validating",
+    "publishing",
+    "awaiting_user",
+}
 
 
 class OfficeOSError(RuntimeError):
     """A user-actionable Office OS core error."""
+
+
+def validate_state_leaf(path: Path, description: str) -> os.stat_result | None:
+    try:
+        return validate_private_state_leaf(path, description)
+    except StateLeafError as error:
+        raise OfficeOSError(str(error)) from error
+
+
+def open_state_leaf(
+    path: Path,
+    flags: int,
+    description: str,
+    *,
+    create: bool = False,
+    exclusive: bool = False,
+) -> int:
+    try:
+        return open_private_state_leaf(
+            path, flags, description, create=create, exclusive=exclusive
+        )
+    except StateLeafError as error:
+        raise OfficeOSError(str(error)) from error
+
+
+def ensure_state_leaf(path: Path, description: str) -> None:
+    try:
+        ensure_private_state_leaf(path, description)
+    except StateLeafError as error:
+        raise OfficeOSError(str(error)) from error
+
+
+def unlink_state_leaf(path: Path, description: str, *, missing_ok: bool = False) -> None:
+    try:
+        unlink_private_state_leaf(path, description, missing_ok=missing_ok)
+    except StateLeafError as error:
+        raise OfficeOSError(str(error)) from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,87 +175,240 @@ def canonical_workspace(cwd: str | Path | None = None) -> str:
 
 def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
-    if configured:
-        return canonical_path(configured)
-    return canonical_path(Path(tempfile.gettempdir()) / "office-os-plugin-data")
+    if not configured:
+        raise OfficeOSError("Office OS requires the hook-injected PLUGIN_DATA value.")
+    return Path(os.path.abspath(configured))
+
+
+def validate_plugin_data_ancestors(root: Path) -> None:
+    for component in (*reversed(root.parents), root):
+        if not os.path.lexists(component):
+            continue
+        if is_linklike(component) or not component.is_dir():
+            raise OfficeOSError(
+                "Managed OfficeCLI plugin data root is linked or invalid."
+            )
+
+
+def ensure_plugin_data_root() -> Path:
+    root = plugin_data_root()
+    validate_plugin_data_ancestors(root)
+    if os.path.lexists(root):
+        if is_linklike(root) or not root.is_dir():
+            raise OfficeOSError("Managed OfficeCLI plugin data root is linked or invalid.")
+    else:
+        root.mkdir(parents=True)
+    validate_plugin_data_ancestors(root)
+    if is_linklike(root) or not root.is_dir():
+        raise OfficeOSError("Managed OfficeCLI plugin data root is linked or invalid.")
+    return root
+
+
+def active_candidate_paths(data_root: Path) -> list[Path]:
+    validate_plugin_data_ancestors(data_root)
+    workspaces = data_root / "workspaces"
+    if not os.path.lexists(workspaces):
+        return []
+    if is_linklike(workspaces) or not workspaces.is_dir():
+        raise OfficeOSError("Office OS workspace state root is linked or invalid.")
+    active: list[Path] = []
+    for workspace in workspaces.iterdir():
+        if is_linklike(workspace) or not workspace.is_dir():
+            raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
+        path = workspace / "run_state.json"
+        if not os.path.lexists(path):
+            continue
+        if is_linklike(path) or not path.is_file():
+            raise OfficeOSError("Office OS run state is linked or invalid.")
+        state = read_json_strict(path, "Office OS run state")
+        if not isinstance(state, dict):
+            raise OfficeOSError("Office OS run state must be a JSON object.")
+        if state.get("status") not in ACTIVE_RUN_STATUSES:
+            continue
+        try:
+            active.extend(active_run_candidate_paths(data_root, state))
+        except CandidateLifecycleError as error:
+            raise OfficeOSError(f"Invalid active Office OS run state: {error}") from error
+    return active
 
 
 def cleanup_managed_candidates(
     *, older_than_seconds: int = MAX_CANDIDATE_AGE_SECONDS
 ) -> CandidateCleanupResult:
+    data_root = plugin_data_root()
     try:
-        return prune_managed_candidates(
-            plugin_data_root(), older_than_seconds=older_than_seconds
-        )
+        if not os.path.lexists(data_root):
+            return prune_managed_candidates(
+                data_root, older_than_seconds=older_than_seconds
+            )
+        if is_linklike(data_root) or not data_root.is_dir():
+            raise CandidateLifecycleError(
+                "Managed OfficeCLI plugin data root is linked or invalid."
+            )
+        with state_lock(data_root):
+            return prune_managed_candidates(
+                data_root,
+                older_than_seconds=older_than_seconds,
+                preserve=active_candidate_paths(data_root),
+            )
     except CandidateLifecycleError as error:
         raise OfficeOSError(str(error)) from error
 
 
 def cleanup_run_candidate(state: dict[str, Any]) -> bool:
-    value = state.get("candidate")
-    if not isinstance(value, str):
-        return False
+    data_root = plugin_data_root()
     try:
-        return remove_managed_candidate(plugin_data_root(), Path(value))
+        if is_linklike(data_root) or not data_root.is_dir():
+            raise CandidateLifecycleError(
+                "Managed OfficeCLI plugin data root is linked or invalid."
+            )
+        with state_lock(data_root):
+            removed = False
+            candidate = state.get("candidate")
+            if isinstance(candidate, str):
+                removed = remove_managed_candidate(data_root, Path(candidate))
+            candidate_directory = state.get("candidate_directory")
+            if isinstance(candidate_directory, str):
+                removed = (
+                    remove_candidate_directory(data_root, candidate_directory) or removed
+                )
+            return removed
     except CandidateLifecycleError as error:
         raise OfficeOSError(str(error)) from error
+
+
+def cleanup_after_committed_publish(state: dict[str, Any]) -> tuple[bool, str | None]:
+    try:
+        return cleanup_run_candidate(state), None
+    except (OfficeOSError, OSError) as error:
+        return False, str(error)
 
 
 def get_workspace_dir(cwd: str | Path | None = None) -> Path:
     canonical = canonical_workspace(cwd)
     workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
-    directory = plugin_data_root() / "workspaces" / workspace_id
-    directory.mkdir(parents=True, exist_ok=True)
+    root = ensure_plugin_data_root()
+    workspaces = root / "workspaces"
+    if os.path.lexists(workspaces):
+        if is_linklike(workspaces) or not workspaces.is_dir():
+            raise OfficeOSError("Office OS workspace state root is linked or invalid.")
+    else:
+        workspaces.mkdir()
+    directory = workspaces / workspace_id
+    if os.path.lexists(directory):
+        if is_linklike(directory) or not directory.is_dir():
+            raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
+    else:
+        directory.mkdir()
+    if directory.resolve(strict=True).parent != workspaces.resolve(strict=True):
+        raise OfficeOSError("Office OS workspace state entry escapes plugin data.")
     return directory
 
 
 def read_json(path: Path, default: Any) -> Any:
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, json.JSONDecodeError):
+        descriptor = open_state_leaf(path, os.O_RDONLY, "Office OS state leaf")
+    except FileNotFoundError:
         return default
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return default
+
+
+def read_json_strict(path: Path, label: str) -> Any:
+    try:
+        descriptor = open_state_leaf(path, os.O_RDONLY, label)
+    except FileNotFoundError as error:
+        raise OfficeOSError(f"{label} is unreadable or malformed.") from error
+    try:
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise OfficeOSError(f"{label} is unreadable or malformed.") from error
 
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{TEMP_PREFIX}{path.name}.{os.getpid()}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    validate_state_leaf(path, "Office OS state leaf")
+    descriptor = open_state_leaf(
+        temporary,
+        os.O_WRONLY,
+        "Office OS state temporary",
+        create=True,
+        exclusive=True,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        validate_state_leaf(temporary, "Office OS state temporary")
+        validate_state_leaf(path, "Office OS state leaf")
+        os.replace(temporary, path)
+        validate_state_leaf(path, "Office OS state leaf")
+    except (OSError, TypeError, ValueError, OfficeOSError):
+        if os.path.lexists(temporary):
+            unlink_state_leaf(temporary, "Office OS state temporary")
+        raise
 
 
 @contextlib.contextmanager
 def state_lock(directory: Path, timeout: float = 1.0) -> Iterator[None]:
     lock_path = directory / "run-state.lock"
     deadline = time.monotonic() + timeout
-    descriptor: int | None = None
-    while descriptor is None:
-        try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            try:
-                lock_is_stale = time.time() - lock_path.stat().st_mtime > 120
-            except OSError:
-                lock_is_stale = False
-            if lock_is_stale:
-                lock_path.unlink(missing_ok=True)
-                continue
-            if time.monotonic() >= deadline:
-                raise OfficeOSError("Office OS state is busy; retry the current chunk.")
-            time.sleep(0.025)
+    descriptor = open_state_leaf(
+        lock_path, os.O_RDWR, "Office OS state lock", create=True
+    )
+    locked = False
+    owner_token = uuid.uuid4().hex
     try:
-        os.write(descriptor, f"{os.getpid()} {time.time()}".encode("ascii"))
-        os.close(descriptor)
-        descriptor = None
+        if os.fstat(descriptor).st_size == 0:
+            os.write(descriptor, b"\0")
+            os.fsync(descriptor)
+        while not locked:
+            try:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise OfficeOSError(
+                        "Office OS state is busy; retry the current chunk."
+                    )
+                time.sleep(0.025)
+        owner = json.dumps(
+            {"pid": os.getpid(), "token": owner_token},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        os.write(descriptor, owner)
+        os.ftruncate(descriptor, len(owner))
+        os.fsync(descriptor)
         yield
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        lock_path.unlink(missing_ok=True)
+        if locked:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def fingerprint(path: str | Path) -> Fingerprint:
@@ -238,18 +447,58 @@ def combined_source_digest(values: Sequence[Fingerprint]) -> str | None:
     return digest.hexdigest()
 
 
+def collision_safe_part(value: str, maximum: int) -> str:
+    if len(value) <= maximum:
+        return value
+    suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"{value[: maximum - len(suffix) - 1]}-{suffix}"
+
+
+def canonical_task_identity(task: str) -> str:
+    normalized = unicodedata.normalize("NFKC", task)
+    return re.sub(r"\s+", " ", normalized.strip()).casefold()
+
+
 def stable_task_key(task: str) -> str:
-    normalized = re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "-", task.strip().lower())
-    normalized = re.sub(r"-+", "-", normalized).strip("-")
-    if normalized:
-        return normalized[:80]
-    return hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
+    identity = canonical_task_identity(task)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    readable = re.sub(r"[^0-9A-Za-z\u3400-\u9fff]+", "-", identity)
+    readable = re.sub(r"-+", "-", readable).strip("-") or "task"
+    return f"{readable[:67].rstrip('-')}-{digest}"
 
 
 def safe_filename_part(value: str) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", value).strip(" .-")
     cleaned = re.sub(r"\s+", " ", cleaned)
-    return (cleaned or "Office OS Result")[:100]
+    return collision_safe_part(cleaned or "Office OS Result", 100)
+
+
+def safe_task_filename(task: str) -> str:
+    identity = canonical_task_identity(task)
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", identity).strip(" .-")
+    readable = cleaned or "Office OS Result"
+    return f"{readable[:87].rstrip(' .-')}-{digest}"
+
+
+def bounded_integer(value: str, minimum: int, maximum: int, label: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{label} must be an integer.") from error
+    if parsed < minimum or parsed > maximum:
+        raise argparse.ArgumentTypeError(
+            f"{label} is out of range ({minimum}..{maximum})."
+        )
+    return parsed
+
+
+def query_limit(value: str) -> int:
+    return bounded_integer(value, 1, MAX_QUERY_RESULTS, "query limit")
+
+
+def query_max_chars(value: str) -> int:
+    return bounded_integer(value, 1, MAX_QUERY_TEXT_CHARS, "query max-chars")
 
 
 def local_name(tag: str) -> str:
@@ -314,7 +563,7 @@ def detect_sensitivity(path: Path) -> tuple[str, str]:
         except ImportError:
             return "normal", ""
         except (OSError, ValueError, PyPdfError):
-            return "metadata-only", "unreadable PDF"
+            return "normal", ""
     return "normal", ""
 
 
@@ -646,47 +895,54 @@ def extract_xlsx(path: Path) -> list[dict[str, Any]]:
 def extract_pdf(path: Path) -> list[dict[str, Any]]:
     try:
         from pypdf import PdfReader
+        from pypdf.errors import PyPdfError
     except ImportError as error:
         raise OfficeOSError(
             "PDF text extraction requires the bundled pypdf library; metadata was still indexed."
         ) from error
-    reader = PdfReader(path)
-    if reader.is_encrypted:
-        raise OfficeOSError("Encrypted PDF content is metadata-only.")
-    results: list[dict[str, Any]] = []
-    page_buffer: list[str] = []
-    page_start = 1
-    ordinal = 0
-    for index, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if text:
-            page_buffer.append(f"[Page {index}]\n{text}")
-        if len("\n\n".join(page_buffer)) >= 12000 or index == len(reader.pages):
-            if page_buffer:
-                results.append(
-                    chunk(
-                        ordinal,
-                        f"pages={page_start}-{index}",
-                        f"Pages {page_start}-{index}",
-                        "\n\n".join(page_buffer),
+    try:
+        reader = PdfReader(path)
+        if reader.is_encrypted:
+            raise OfficeOSError("Encrypted PDF content is metadata-only.")
+        results: list[dict[str, Any]] = []
+        page_buffer: list[str] = []
+        page_start = 1
+        ordinal = 0
+        for index, page in enumerate(reader.pages, start=1):
+            text = (page.extract_text() or "").strip()
+            if text:
+                page_buffer.append(f"[Page {index}]\n{text}")
+            if len("\n\n".join(page_buffer)) >= 12000 or index == len(reader.pages):
+                if page_buffer:
+                    results.append(
+                        chunk(
+                            ordinal,
+                            f"pages={page_start}-{index}",
+                            f"Pages {page_start}-{index}",
+                            "\n\n".join(page_buffer),
+                        )
                     )
-                )
-                ordinal += 1
-            page_buffer = []
-            page_start = index + 1
-    return results
+                    ordinal += 1
+                page_buffer = []
+                page_start = index + 1
+        return results
+    except PyPdfError as error:
+        raise OfficeOSError(f"PDF text extraction failed: {error}") from error
 
 
 def extract_chunks(path: Path) -> list[dict[str, Any]]:
     extension = path.suffix.lower()
-    if extension == ".docx":
-        return extract_docx(path)
-    if extension == ".pptx":
-        return extract_pptx(path)
-    if extension == ".xlsx":
-        return extract_xlsx(path)
-    if extension == ".pdf":
-        return extract_pdf(path)
+    try:
+        if extension == ".docx":
+            return extract_docx(path)
+        if extension == ".pptx":
+            return extract_pptx(path)
+        if extension == ".xlsx":
+            return extract_xlsx(path)
+        if extension == ".pdf":
+            return extract_pdf(path)
+    except (KeyError, UnicodeError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
+        raise OfficeOSError(f"Could not extract {extension} content: {error}") from error
     raise OfficeOSError(f"Content extraction requires conversion for {extension}.")
 
 
@@ -705,8 +961,26 @@ def object_type(extension: str) -> str:
     }[extension]
 
 
+def database_state_leaves(directory: Path) -> tuple[Path, ...]:
+    database = directory / "office.db"
+    return (
+        database,
+        database.with_name(f"{database.name}-wal"),
+        database.with_name(f"{database.name}-shm"),
+        database.with_name(f"{database.name}-journal"),
+    )
+
+
+def validate_database_state_leaves(directory: Path) -> None:
+    for path in database_state_leaves(directory):
+        validate_state_leaf(path, "Office OS database state")
+
+
 def connect_database(directory: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(directory / "office.db")
+    database, *_sidecars = database_state_leaves(directory)
+    ensure_state_leaf(database, "Office OS database state")
+    validate_database_state_leaves(directory)
+    connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
@@ -787,14 +1061,25 @@ def connect_database(directory: Path) -> sqlite3.Connection:
             "INSERT OR REPLACE INTO settings(key, value) VALUES('fts_tokenizer', 'unicode61-fallback')"
         )
     connection.commit()
+    validate_database_state_leaves(directory)
     return connection
+
+
+def close_database(connection: sqlite3.Connection, directory: Path) -> None:
+    try:
+        validate_database_state_leaves(directory)
+    finally:
+        connection.close()
 
 
 def ignored_path(path: Path) -> bool:
     lowered_parts = {part.lower() for part in path.parts}
     name = path.name.lower()
+    resolved = canonical_path(path)
+    data_root = canonical_path(plugin_data_root())
     return (
-        OUTPUT_DIRECTORY_NAME.lower() in lowered_parts
+        path_is_under(resolved, data_root)
+        or OUTPUT_DIRECTORY_NAME.lower() in lowered_parts
         or name.startswith("~$")
         or name.startswith(TEMP_PREFIX)
         or re.search(r"\.bak\.[123]$", name) is not None
@@ -1111,7 +1396,7 @@ def command_index(args: argparse.Namespace) -> int:
         stats["database"] = os.fspath(directory / "office.db")
         json_print(stats)
     finally:
-        connection.close()
+        close_database(connection, directory)
     return 0
 
 
@@ -1124,15 +1409,20 @@ def filter_current_query_rows(
 ) -> list[sqlite3.Row]:
     current: list[sqlite3.Row] = []
     stale_document_ids: set[int] = set()
+    current_hashes: dict[int, str] = {}
     for row in rows:
-        try:
-            current_sha256 = fingerprint(row["path"]).sha256
-        except OfficeOSError:
-            current_sha256 = ""
+        document_id = int(row["document_id"])
+        current_sha256 = current_hashes.get(document_id)
+        if current_sha256 is None:
+            try:
+                current_sha256 = fingerprint(row["path"]).sha256
+            except OfficeOSError:
+                current_sha256 = ""
+            current_hashes[document_id] = current_sha256
         if current_sha256 == row["document_sha256"]:
             current.append(row)
         else:
-            stale_document_ids.add(int(row["document_id"]))
+            stale_document_ids.add(document_id)
     if stale_document_ids:
         with connection:
             for document_id in stale_document_ids:
@@ -1152,6 +1442,8 @@ def filter_current_query_rows(
 def command_query(args: argparse.Namespace) -> int:
     directory = get_workspace_dir(args.cwd)
     connection = connect_database(directory)
+    limit = args.limit
+    max_chars = args.max_chars
     filters: list[str] = []
     parameters: list[Any] = []
     if args.object:
@@ -1177,7 +1469,7 @@ def command_query(args: argparse.Namespace) -> int:
                 ORDER BY rank
                 LIMIT ?
                 """,
-                [fts_phrase(args.text.strip()), *parameters, args.limit],
+                [fts_phrase(args.text.strip()), *parameters, limit],
             ).fetchall()
             rows = filter_current_query_rows(connection, rows)
         if not rows:
@@ -1194,7 +1486,7 @@ def command_query(args: argparse.Namespace) -> int:
                 {filter_sql}
                 LIMIT ?
                 """,
-                [like, like, like, *parameters, args.limit],
+                [like, like, like, *parameters, limit],
             ).fetchall()
             rows = filter_current_query_rows(connection, rows)
         json_print(
@@ -1207,7 +1499,7 @@ def command_query(args: argparse.Namespace) -> int:
                         "object": row["object_type"],
                         "locator": row["locator"],
                         "heading": row["heading"],
-                        "text": row["text"][: args.max_chars],
+                        "text": row["text"][:max_chars],
                         "content_hash": row["content_hash"],
                         "rank": row["rank"],
                     }
@@ -1216,7 +1508,7 @@ def command_query(args: argparse.Namespace) -> int:
             }
         )
     finally:
-        connection.close()
+        close_database(connection, directory)
     return 0
 
 
@@ -1226,18 +1518,24 @@ def single_flight_path(directory: Path) -> Path:
 
 def acquire_single_flight(directory: Path, run_id: str, task_key: str) -> bool:
     path = single_flight_path(directory)
-    if path.exists():
-        try:
-            if time.time() - path.stat().st_mtime > LOCK_STALE_SECONDS:
-                path.unlink(missing_ok=True)
-            else:
-                return False
-        except OSError:
+    status = validate_state_leaf(path, "Office OS scheduled state")
+    if status is not None:
+        if time.time() - status.st_mtime > LOCK_STALE_SECONDS:
+            unlink_state_leaf(path, "Office OS scheduled state")
+        else:
             return False
     try:
-        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return False
+        descriptor = open_state_leaf(
+            path,
+            os.O_WRONLY,
+            "Office OS scheduled state",
+            create=True,
+            exclusive=True,
+        )
+    except OfficeOSError:
+        if validate_state_leaf(path, "Office OS scheduled state") is not None:
+            return False
+        raise
     try:
         payload = json.dumps(
             {
@@ -1254,11 +1552,11 @@ def acquire_single_flight(directory: Path, run_id: str, task_key: str) -> bool:
 
 def release_single_flight(directory: Path, run_id: str | None) -> None:
     path = single_flight_path(directory)
-    if not path.exists():
+    if validate_state_leaf(path, "Office OS scheduled state") is None:
         return
     data = read_json(path, {})
     if not run_id or not isinstance(data, dict) or data.get("run_id") == run_id:
-        path.unlink(missing_ok=True)
+        unlink_state_leaf(path, "Office OS scheduled state", missing_ok=True)
 
 
 def run_state_path(directory: Path) -> Path:
@@ -1266,13 +1564,20 @@ def run_state_path(directory: Path) -> Path:
 
 
 def read_run_state(directory: Path) -> dict[str, Any]:
-    value = read_json(run_state_path(directory), {})
-    return value if isinstance(value, dict) else {}
+    path = run_state_path(directory)
+    if not os.path.lexists(path):
+        return {}
+    if is_linklike(path) or not path.is_file():
+        raise OfficeOSError("Office OS run state is linked or invalid.")
+    value = read_json_strict(path, "Office OS run state")
+    if not isinstance(value, dict):
+        raise OfficeOSError("Office OS run state must be a JSON object.")
+    return value
 
 
 def command_begin(args: argparse.Namespace) -> int:
-    candidate_cleanup = cleanup_managed_candidates()
     directory = get_workspace_dir(args.cwd)
+    data_root = ensure_plugin_data_root()
     if args.units < 0:
         raise OfficeOSError("Unit count cannot be negative.")
     source_fingerprints = fingerprint_sources(args.source or [])
@@ -1280,14 +1585,20 @@ def command_begin(args: argparse.Namespace) -> int:
     run_id = uuid.uuid4().hex
     with state_lock(directory):
         existing = read_run_state(directory)
-        if existing.get("status") in {
-            "grounding",
-            "agreed",
-            "executing",
-            "validating",
-            "publishing",
-            "awaiting_user",
-        }:
+        if existing.get("status") in ACTIVE_RUN_STATUSES:
+            json_print(
+                {
+                    "status": "overlap_skipped",
+                    "task_key": task_key,
+                    "active_run_id": existing.get("run_id"),
+                    "reason": "another Office OS run is active in this workspace",
+                }
+            )
+            return 0
+    candidate_cleanup = cleanup_managed_candidates()
+    with state_lock(directory):
+        existing = read_run_state(directory)
+        if existing.get("status") in ACTIVE_RUN_STATUSES:
             json_print(
                 {
                     "status": "overlap_skipped",
@@ -1308,34 +1619,47 @@ def command_begin(args: argparse.Namespace) -> int:
                 }
             )
             return 0
-        state = {
-            "run_id": run_id,
-            "task_key": task_key,
-            "task": args.task,
-            "intent": args.intent,
-            "object": args.object,
-            "permission": args.permission,
-            "qa": args.qa,
-            "mode": args.mode,
-            "sources": [item.as_dict() for item in source_fingerprints],
-            "source_digest": combined_source_digest(source_fingerprints),
-            "status": "executing",
-            "total_units": args.units,
-            "remaining_units": args.units,
-            "progress_marker": "",
-            "last_stop_marker": "",
-            "continuation_count": 0,
-            "no_progress_stops": 0,
-            "waiting_for_user": False,
-            "candidate_cleanup": {
-                "removed_count": candidate_cleanup["removed_count"],
-                "remaining_files": candidate_cleanup["remaining_files"],
-                "remaining_bytes": candidate_cleanup["remaining_bytes"],
-            },
-            "created_at": utc_now(),
-            "updated_at": utc_now(),
-        }
-        write_json(run_state_path(directory), state)
+        candidate_directory: Path | None = None
+        try:
+            with state_lock(data_root):
+                candidate_directory = reserve_candidate_directory(data_root, run_id)
+                state = {
+                    "run_id": run_id,
+                    "task_key": task_key,
+                    "task": args.task,
+                    "intent": args.intent,
+                    "object": args.object,
+                    "permission": args.permission,
+                    "qa": args.qa,
+                    "mode": args.mode,
+                    "sources": [item.as_dict() for item in source_fingerprints],
+                    "source_digest": combined_source_digest(source_fingerprints),
+                    "status": "executing",
+                    "total_units": args.units,
+                    "remaining_units": args.units,
+                    "progress_marker": "",
+                    "last_stop_marker": "",
+                    "continuation_count": 0,
+                    "no_progress_stops": 0,
+                    "waiting_for_user": False,
+                    "candidate": None,
+                    "candidate_directory": os.fspath(candidate_directory),
+                    "candidate_cleanup": {
+                        "removed_count": candidate_cleanup["removed_count"],
+                        "remaining_files": candidate_cleanup["remaining_files"],
+                        "remaining_bytes": candidate_cleanup["remaining_bytes"],
+                    },
+                    "created_at": utc_now(),
+                    "updated_at": utc_now(),
+                }
+                try:
+                    write_json(run_state_path(directory), state)
+                except (OSError, OfficeOSError, CandidateLifecycleError):
+                    remove_candidate_directory(data_root, candidate_directory)
+                    raise
+        except (OSError, OfficeOSError, CandidateLifecycleError):
+            release_single_flight(directory, run_id)
+            raise
     json_print(state)
     return 0
 
@@ -1385,7 +1709,9 @@ def command_complete(args: argparse.Namespace) -> int:
             "candidate_removed": cleanup_run_candidate(state) if state else False,
         }
         write_json(directory / "latest_summary.json", summary)
-        run_state_path(directory).unlink(missing_ok=True)
+        unlink_state_leaf(
+            run_state_path(directory), "Office OS run state", missing_ok=True
+        )
         release_single_flight(directory, state.get("run_id") if state else None)
     json_print(summary)
     return 0
@@ -1465,6 +1791,10 @@ def validate_candidate(path: Path) -> dict[str, Any]:
                 for name in names
             ):
                 raise OfficeOSError("Candidate presentation has no slide part.")
+            try:
+                validate_openxml(package, extension)
+            except OpenXMLValidationError as error:
+                raise OfficeOSError(str(error)) from error
     except zipfile.BadZipFile as error:
         raise OfficeOSError("Candidate is not a valid Open XML package.") from error
     return {
@@ -1483,23 +1813,34 @@ def output_target(
     cwd: str | None,
 ) -> tuple[Path, Path]:
     parent = source.parent if source else canonical_path(cwd or os.getcwd())
-    output_directory = parent / OUTPUT_DIRECTORY_NAME
-    output_directory.mkdir(parents=True, exist_ok=True)
-    output_directory = canonical_path(output_directory)
-    if requested_target:
-        requested = canonical_path(requested_target)
-        if requested.parent != output_directory:
-            raise OfficeOSError(
-                f"Output target must be directly under {output_directory}."
-            )
-        target = requested
+    lexical_output = parent / OUTPUT_DIRECTORY_NAME
+    if os.path.lexists(lexical_output):
+        if is_linklike(lexical_output) or not lexical_output.is_dir():
+            raise OfficeOSError("Office OS Output is linked or invalid.")
     else:
-        task_name = safe_filename_part(task)
-        if source:
-            filename = f"{safe_filename_part(source.stem)} - {task_name}{candidate.suffix.lower()}"
-        else:
-            filename = f"{task_name}{candidate.suffix.lower()}"
-        target = output_directory / filename
+        lexical_output.mkdir(parents=True)
+    if is_linklike(lexical_output):
+        raise OfficeOSError("Office OS Output is linked or invalid.")
+    output_directory = canonical_path(lexical_output)
+    if output_directory.parent != canonical_path(parent):
+        raise OfficeOSError("Office OS Output escapes its source workspace.")
+    task_name = safe_task_filename(task)
+    if source:
+        filename = (
+            f"{safe_filename_part(source.stem)} - {task_name}"
+            f"{candidate.suffix.lower()}"
+        )
+    else:
+        filename = f"{task_name}{candidate.suffix.lower()}"
+    target = output_directory / filename
+    if requested_target:
+        requested = Path(os.path.abspath(requested_target))
+        if os.path.normcase(os.fspath(requested)) != os.path.normcase(os.fspath(target)):
+            raise OfficeOSError(
+                f"Requested output does not match the fixed stable target: {target}"
+            )
+    if os.path.lexists(target) and is_linklike(target):
+        raise OfficeOSError("The stable output target is linked or invalid.")
     if target.suffix.lower() != candidate.suffix.lower():
         raise OfficeOSError("Output target and candidate extensions must match.")
     return output_directory, target
@@ -1585,13 +1926,18 @@ def update_publish_record(
         "output_sha256": output_fingerprint.sha256,
         "published_at": utc_now(),
     }
-    live_items = [
-        (key, value)
-        for key, value in tasks.items()
-        if isinstance(value, dict)
-        and value.get("target")
-        and Path(value["target"]).exists()
-    ]
+    live_items: list[tuple[str, dict[str, Any]]] = []
+    for key, value in tasks.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        record_target = value.get("target")
+        if not isinstance(record_target, str) or not record_target:
+            continue
+        try:
+            if Path(record_target).exists():
+                live_items.append((key, value))
+        except (OSError, TypeError, ValueError):
+            continue
     live_items.sort(
         key=lambda item: str(item[1].get("published_at") or ""), reverse=True
     )
@@ -1686,13 +2032,17 @@ def command_needs_run(args: argparse.Namespace) -> int:
 
 def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
     candidate_input = Path(os.path.abspath(os.fspath(args.candidate)))
-    candidate = canonical_path(candidate_input)
     sources = [canonical_path(item) for item in (args.source or [])]
     primary_source = sources[0] if sources else None
     sources_before = fingerprint_sources(sources)
     task_key = stable_task_key(args.task)
     active_run = require_publish_authority(directory, task_key, args.mode)
-    active_run["candidate"] = os.fspath(candidate_input)
+    data_root = ensure_plugin_data_root()
+    try:
+        candidate = validated_run_candidate(data_root, active_run, candidate_input)
+    except CandidateLifecycleError as error:
+        raise OfficeOSError(str(error)) from error
+    active_run["candidate"] = os.fspath(candidate)
     active_run["updated_at"] = utc_now()
     write_json(run_state_path(directory), active_run)
     if (
@@ -1713,6 +2063,11 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
         if candidate.parent == output_directory and candidate.name.startswith(TEMP_PREFIX):
             candidate.unlink(missing_ok=True)
         candidate_removed = cleanup_run_candidate(active_run)
+        active_run["candidate"] = None
+        active_run["candidate_directory"] = None
+        active_run["candidate_cleanup_error"] = None
+        active_run["updated_at"] = utc_now()
+        write_json(run_state_path(directory), active_run)
         json_print(
             {
                 "status": "unchanged",
@@ -1723,8 +2078,11 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
             }
         )
         return 0
-    validation = validate_candidate(candidate)
+    validate_candidate(candidate)
     stage, copied = prepare_stage(candidate, output_directory)
+    committed = False
+    post_commit_errors: list[str] = []
+    result: dict[str, Any] | None = None
     try:
         stage_validation = validate_candidate(stage)
         sources_after = fingerprint_sources(sources)
@@ -1732,6 +2090,15 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
             raise OfficeOSError(
                 "A source changed during the run; candidate was not published."
             )
+        stage_fingerprint = fingerprint(stage)
+        output_fingerprint = Fingerprint(
+            path=os.path.normcase(os.fspath(target)),
+            size=stage_fingerprint.size,
+            mtime_ns=stage_fingerprint.mtime_ns,
+            sha256=stage_fingerprint.sha256,
+            device=stage_fingerprint.device,
+            inode=stage_fingerprint.inode,
+        )
         if target.exists():
             method = (
                 scheduled_replace(target, stage)
@@ -1743,34 +2110,54 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
         else:
             os.replace(stage, target)
             method = "os.replace-new"
-        output_fingerprint = fingerprint(target)
-        update_publish_record(
-            directory, task_key, target, sources_before, output_fingerprint
-        )
-        candidate_removed = cleanup_run_candidate(active_run)
-        json_print(
-            {
-                "status": "published",
-                "task_key": task_key,
-                "target": os.fspath(target),
-                "method": method,
-                "validation": stage_validation,
-                "sources_unchanged": (
-                    combined_source_digest(fingerprint_sources(sources))
-                    == combined_source_digest(sources_before)
-                    if sources
-                    else None
-                ),
-                "candidate_removed": candidate_removed,
-            }
-        )
+        committed = True
+        try:
+            update_publish_record(
+                directory, task_key, target, sources_before, output_fingerprint
+            )
+        except (OSError, OfficeOSError, TypeError, ValueError) as error:
+            post_commit_errors.append(f"publish record: {error}")
+        candidate_removed, cleanup_error = cleanup_after_committed_publish(active_run)
+        if cleanup_error is None:
+            active_run["candidate"] = None
+            active_run["candidate_directory"] = None
+        active_run["candidate_cleanup_error"] = cleanup_error
+        active_run["updated_at"] = utc_now()
+        try:
+            write_json(run_state_path(directory), active_run)
+        except (OSError, OfficeOSError, TypeError, ValueError) as error:
+            post_commit_errors.append(f"run state: {error}")
+        result = {
+            "status": "published",
+            "task_key": task_key,
+            "target": os.fspath(target),
+            "method": method,
+            "validation": stage_validation,
+            "sources_unchanged": True if sources else None,
+            "candidate_removed": candidate_removed,
+        }
+        if cleanup_error:
+            result["candidate_cleanup_error"] = cleanup_error
     finally:
         if stage.exists() and stage != target:
-            stage.unlink(missing_ok=True)
+            try:
+                stage.unlink(missing_ok=True)
+            except OSError as error:
+                if committed:
+                    post_commit_errors.append(f"stage cleanup: {error}")
         if copied and candidate.parent == output_directory and candidate.name.startswith(
             TEMP_PREFIX
         ):
-            candidate.unlink(missing_ok=True)
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError as error:
+                if committed:
+                    post_commit_errors.append(f"candidate cleanup: {error}")
+    if result is None:
+        raise OfficeOSError("Publish did not produce a result.")
+    if post_commit_errors:
+        result["post_commit_errors"] = post_commit_errors
+    json_print(result)
     return 0
 
 
@@ -1783,33 +2170,52 @@ def command_publish(args: argparse.Namespace) -> int:
 def command_cleanup(args: argparse.Namespace) -> int:
     directory = get_workspace_dir(args.cwd)
     removed: list[str] = []
-    roots = [canonical_path(args.path)] if args.path else [canonical_path(args.cwd or os.getcwd())]
+    roots = (
+        [Path(os.path.abspath(args.path))]
+        if args.path
+        else [Path(os.path.abspath(args.cwd or os.getcwd()))]
+    )
     cutoff = time.time() - args.older_than_seconds
     managed = cleanup_managed_candidates(older_than_seconds=args.older_than_seconds)
     removed.extend(str(path) for path in managed["removed"])
     for root in roots:
+        if is_linklike(root) or not root.is_dir():
+            raise OfficeOSError("Office cleanup root is linked or invalid.")
         output_directory = root / OUTPUT_DIRECTORY_NAME
-        if output_directory.is_dir():
+        if os.path.lexists(output_directory):
+            if is_linklike(output_directory) or not output_directory.is_dir():
+                raise OfficeOSError("Office OS Output is linked or invalid.")
             for candidate in output_directory.glob(f"{TEMP_PREFIX}*"):
                 try:
+                    if is_linklike(candidate):
+                        raise OfficeOSError(
+                            "Office OS Output contains a linked temporary entry."
+                        )
                     if candidate.is_file() and candidate.stat().st_mtime <= cutoff:
                         candidate.unlink()
                         removed.append(os.fspath(candidate))
+                except OfficeOSError:
+                    raise
                 except OSError:
                     continue
     for temporary in directory.glob(f"{TEMP_PREFIX}*"):
         try:
+            if is_linklike(temporary):
+                raise OfficeOSError("Office OS state contains a linked temporary entry.")
             if temporary.stat().st_mtime <= cutoff:
                 if temporary.is_dir():
                     shutil.rmtree(temporary)
                 else:
                     temporary.unlink()
                 removed.append(os.fspath(temporary))
+        except OfficeOSError:
+            raise
         except OSError:
             continue
     lock = single_flight_path(directory)
-    if lock.exists() and time.time() - lock.stat().st_mtime > LOCK_STALE_SECONDS:
-        lock.unlink(missing_ok=True)
+    lock_status = validate_state_leaf(lock, "Office OS scheduled state")
+    if lock_status is not None and time.time() - lock_status.st_mtime > LOCK_STALE_SECONDS:
+        unlink_state_leaf(lock, "Office OS scheduled state", missing_ok=True)
         removed.append(os.fspath(lock))
     removed_count = len(removed) - len(managed["removed"]) + int(
         managed["removed_count"]
@@ -1922,8 +2328,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--object", choices=["excel", "word", "powerpoint", "pdf"]
     )
     query.add_argument("--path-prefix")
-    query.add_argument("--limit", type=int, default=10)
-    query.add_argument("--max-chars", type=int, default=3000)
+    query.add_argument("--limit", type=query_limit, default=10)
+    query.add_argument("--max-chars", type=query_max_chars, default=3000)
     query.set_defaults(function=command_query)
 
     begin = subparsers.add_parser("begin", help="Start one bounded Office run.")
