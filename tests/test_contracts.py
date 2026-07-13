@@ -84,17 +84,22 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "未提供本機 Office 來源時：最終唯一回覆第一行必為"
+                "無本機 Office 來源：最終唯一回覆首行"
             ),
             description,
         )
-        self.assertIn("意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[值]", description)
+        self.assertIn(
+            "意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[快速/加強/完整]",
+            description,
+        )
+        self.assertIn("第四欄只能是「檢查」", description)
+        self.assertIn("不可寫品質或驗證", description)
         self.assertIn("最多一題來源問題", description)
         self.assertIn("不可使用工具、讀檔或 reference", description)
 
-    def test_skill_source_uses_utf8_bom_for_windows_default_read(self) -> None:
+    def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
         source = (ROOT / "skills" / "office-os" / "SKILL.md").read_bytes()
-        self.assertTrue(source.startswith(b"\xef\xbb\xbf"), source[:3].hex())
+        self.assertFalse(source.startswith(b"\xef\xbb\xbf"), source[:3].hex())
 
     def test_office_workflow_policy_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
