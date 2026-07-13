@@ -23,6 +23,7 @@ JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
 POLICY = ROOT / "scripts" / "officecli-mcp" / "policy.cjs"
 RUNNER = ROOT / "scripts" / "officecli-mcp" / "runner.cjs"
 PATHS = ROOT / "scripts" / "officecli-mcp" / "paths.cjs"
+AUTHORITY = ROOT / "scripts" / "officecli-mcp" / "authority.cjs"
 CANDIDATES = ROOT / "skills" / "office-os" / "scripts" / "office_candidates.py"
 CANDIDATE_RUNS = (
     ROOT / "skills" / "office-os" / "scripts" / "office_candidate_runs.py"
@@ -112,6 +113,57 @@ def run_policy(arguments: dict, data_root: Path) -> dict:  # noqa: DICT_OK
         encoding="utf-8",
         capture_output=True,
         check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return json.loads(completed.stdout)
+
+
+def run_authorizer(candidate: Path, data_root: Path) -> dict:  # noqa: DICT_OK
+    script = (
+        "const authority=require(process.argv[1]);"
+        "try{process.stdout.write(JSON.stringify({run:authority.authorizeMutation(process.argv[2])}));}"
+        "catch(error){process.stdout.write(JSON.stringify({error:error.message}));}"
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_DATA"] = os.fspath(data_root)
+    completed = subprocess.run(
+        [NODE or "node", "-e", script, os.fspath(AUTHORITY), os.fspath(candidate)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr)
+    return json.loads(completed.stdout)
+
+
+def run_authorizer_with_reparse_probe(candidate: Path, data_root: Path) -> dict:  # noqa: DICT_OK
+    script = (
+        "const Module=require('node:module');const original=Module._load;let probes=0;"
+        "Module._load=function(request,parent,isMain){if(request==='node:child_process'){"
+        "const child=original.apply(this,arguments);return {...child,spawnSync:(_command,_arguments,options)=>{"
+        "probes+=1;const paths=JSON.parse(options.env.OFFICE_OS_REPARSE_PATHS).paths;"
+        "return {status:0,stdout:JSON.stringify(paths.map(()=>false))};}};}"
+        "return original.apply(this,arguments);};const authority=require(process.argv[1]);"
+        "try{const run=authority.authorizeMutation(process.argv[2]);"
+        "process.stdout.write(JSON.stringify({run,probes}));}"
+        "catch(error){process.stdout.write(JSON.stringify({error:error.message,probes}));}"
+    )
+    environment = os.environ.copy()
+    environment["PLUGIN_DATA"] = os.fspath(data_root)
+    completed = subprocess.run(
+        [NODE or "node", "-e", script, os.fspath(AUTHORITY), os.fspath(candidate)],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+        timeout=15,
     )
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
@@ -275,6 +327,342 @@ class OfficeCLICase(unittest.TestCase):
             self.assertTrue(responses[1]["result"]["isError"])
             self.assertIn("checksum mismatch", responses[1]["result"]["content"][0]["text"])
             self.assertFalse(capture.exists())
+
+    def test_mutations_require_confirmed_matching_core_run_state(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            generic = candidate_root / "generic.xlsx"
+            generic.write_bytes(b"generic")
+            run_id = "a" * 32
+            run_directory = candidate_root / run_id
+            run_directory.mkdir()
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            workspace = data_root / "workspaces" / "workspace"
+            workspace.mkdir(parents=True)
+
+            def call_mutation(target: Path, capture: Path) -> dict:  # noqa: DICT_OK
+                messages = [
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "officecli",
+                            "arguments": {
+                                "command": [
+                                    "set",
+                                    os.fspath(target),
+                                    "/Sheet1/A1",
+                                    "--prop",
+                                    "text=changed",
+                                ]
+                            },
+                        },
+                    },
+                ]
+                payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
+                completed = run_adapter(payload, data_root, base, capture)
+                self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+                return json.loads(completed.stdout.splitlines()[-1])
+
+            no_child_capture = base / "no-child.json"
+            no_child = call_mutation(generic, no_child_capture)
+            self.assertTrue(no_child["result"]["isError"])
+            self.assertFalse(no_child_capture.exists())
+
+            state_path = workspace / "run_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "candidate_directory": os.fspath(run_directory),
+                        "proposal_confirmed": False,
+                        "status": "awaiting_confirmation",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            preconfirmed_capture = base / "preconfirmed.json"
+            preconfirmed = call_mutation(candidate, preconfirmed_capture)
+            self.assertTrue(preconfirmed["result"]["isError"])
+            self.assertFalse(preconfirmed_capture.exists())
+
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "candidate_directory": os.fspath(run_directory),
+                        "proposal_confirmed": True,
+                        "status": "executing",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            allowed_capture = base / "allowed.json"
+            allowed = call_mutation(candidate, allowed_capture)
+            self.assertFalse(allowed["result"].get("isError", False))
+            self.assertEqual(json.loads(allowed_capture.read_text(encoding="utf-8"))["argv"][0], "set")
+
+    def test_mutation_authorizer_fails_closed_for_stale_and_invalid_state_inventory(self) -> None:
+        def fixture() -> tuple[Path, Path, Path, str]:
+            temporary = tempfile.TemporaryDirectory(dir=ROOT)
+            self.addCleanup(temporary.cleanup)
+            base = Path(temporary.name)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            run_id = "b" * 32
+            run_directory = candidate_root / run_id
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            (data_root / "workspaces").mkdir()
+            return data_root, run_directory, candidate, run_id
+
+        def state(run_id: str, run_directory: Path, **overrides: object) -> dict:  # noqa: DICT_OK
+            return {
+                "run_id": run_id,
+                "candidate_directory": os.fspath(run_directory),
+                "proposal_confirmed": True,
+                "status": "executing",
+                **overrides,
+            }
+
+        data_root, run_directory, candidate, run_id = fixture()
+        stale_workspace = data_root / "workspaces" / "stale"
+        stale_workspace.mkdir()
+        (stale_workspace / "run_state.json").write_text(
+            json.dumps(state(run_id, run_directory, status="failed")), encoding="utf-8"
+        )
+        self.assertIn("error", run_authorizer(candidate, data_root))
+
+        data_root, run_directory, candidate, _run_id = fixture()
+        malformed_workspace = data_root / "workspaces" / "malformed"
+        malformed_workspace.mkdir()
+        (malformed_workspace / "run_state.json").write_text("{", encoding="utf-8")
+        self.assertIn("error", run_authorizer(candidate, data_root))
+
+        data_root, run_directory, candidate, run_id = fixture()
+        linked_workspace = data_root / "workspaces" / "linked-state"
+        linked_workspace.mkdir()
+        outside_state = data_root.parent / "outside-run_state.json"
+        outside_state.write_text(json.dumps(state(run_id, run_directory)), encoding="utf-8")
+        os.link(outside_state, linked_workspace / "run_state.json")
+        self.assertIn("error", run_authorizer(candidate, data_root))
+
+        data_root, run_directory, candidate, run_id = fixture()
+        for name in ("first", "second"):
+            workspace = data_root / "workspaces" / name
+            workspace.mkdir()
+            (workspace / "run_state.json").write_text(
+                json.dumps(state(run_id, run_directory)), encoding="utf-8"
+            )
+        duplicate = run_authorizer(candidate, data_root)
+        self.assertIn("error", duplicate)
+        self.assertIn("Duplicate", duplicate["error"])
+
+        data_root, run_directory, candidate, run_id = fixture()
+        outside = data_root.parent / "outside-workspace"
+        outside.mkdir()
+        (outside / "run_state.json").write_text(
+            json.dumps(state(run_id, run_directory)), encoding="utf-8"
+        )
+        linked = data_root / "workspaces" / "linked"
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            linked.symlink_to(outside, target_is_directory=True)
+        try:
+            self.assertIn("error", run_authorizer(candidate, data_root))
+        finally:
+            if os.path.lexists(linked):
+                if os.name == "nt":
+                    os.rmdir(linked)
+                else:
+                    linked.unlink()
+
+        data_root, run_directory, candidate, run_id = fixture()
+        active_workspace = data_root / "workspaces" / "active"
+        active_workspace.mkdir()
+        (active_workspace / "run_state.json").write_text(
+            json.dumps(state(run_id, run_directory)), encoding="utf-8"
+        )
+        for number in range(512):
+            (data_root / "workspaces" / f"overflow-{number}").mkdir()
+        over_limit = run_authorizer(candidate, data_root)
+        self.assertIn("error", over_limit)
+        self.assertIn("limit", over_limit["error"].lower())
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point batching is Windows-specific")
+    def test_mutation_authorizer_batches_bounded_reparse_scans(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            run_id = "d" * 32
+            run_directory = candidate_root / run_id
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            workspaces = data_root / "workspaces"
+            workspaces.mkdir()
+            for number in range(512):
+                workspace = workspaces / f"workspace-{number:03d}"
+                workspace.mkdir()
+                state = {
+                    "run_id": run_id,
+                    "candidate_directory": os.fspath(
+                        run_directory if number == 0 else candidate_root / f"other-{number:03d}"
+                    ),
+                    "proposal_confirmed": True,
+                    "status": "executing",
+                }
+                (workspace / "run_state.json").write_text(
+                    json.dumps(state), encoding="utf-8"
+                )
+            result = run_authorizer_with_reparse_probe(candidate, data_root)
+            self.assertNotIn("error", result)
+            self.assertEqual(result["run"]["runId"], run_id)
+            self.assertLessEqual(result["probes"], 32)
+
+    def test_authorized_postflight_cleanup_preserves_candidate_root_and_sentinels(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            run_id = "c" * 32
+            run_directory = candidate_root / run_id
+            run_directory.mkdir(parents=True)
+            source = run_directory / "candidate.xlsx"
+            source.write_bytes(b"source")
+            sibling = candidate_root / "generic-sibling"
+            sibling.mkdir()
+            sibling_sentinel = sibling / "sibling.xlsx"
+            sibling_sentinel.write_bytes(b"sibling")
+            outside_sentinel = base / "outside-sentinel.txt"
+            outside_sentinel.write_text("outside", encoding="utf-8")
+            overflow = (
+                "const fs=require('node:fs');const path=require('node:path');"
+                "for(let index=0;index<31;index+=1)fs.writeFileSync(path.join(process.argv[1],`overflow-${index}.tmp`),'x');"
+            )
+            result = run_runner(
+                {
+                    "parsed": {
+                        "argv": ["-e", overflow, os.fspath(run_directory)],
+                        "screenshot": False,
+                    },
+                    "options": {
+                        "authority": {
+                            "candidate": os.fspath(source),
+                            "runDirectory": os.fspath(run_directory),
+                        }
+                    },
+                },
+                data_root,
+            )
+            self.assertFalse(result.get("isError", False))
+            self.assertTrue(candidate_root.is_dir())
+            self.assertTrue(run_directory.is_dir())
+            self.assertEqual(source.read_bytes(), b"source")
+            self.assertEqual(sibling_sentinel.read_bytes(), b"sibling")
+            self.assertEqual(outside_sentinel.read_text(encoding="utf-8"), "outside")
+            self.assertEqual(list(run_directory.glob("overflow-*.tmp")), [])
+
+    def test_unconfirmed_termination_poisons_the_mcp_session(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            candidate = candidate_root / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            capture = base / "termination-counts.json"
+            script = (
+                "const fs=require('node:fs');const {EventEmitter}=require('node:events');"
+                "const childProcess=require('node:child_process');let spawns=0,executions=0;"
+                "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++spawns;"
+                "child.stdout=new EventEmitter();child.stderr=new EventEmitter();return child;};"
+                "const adapter=require(process.argv[1]);const runner=require(process.argv[2]);"
+                "process.on('beforeExit',()=>fs.writeFileSync(process.argv[3],JSON.stringify({spawns,executions})));"
+                "adapter.start({verifyRuntime:()=>process.execPath,execute:async(_binary,_parsed,options)=>{"
+                "executions+=1;return runner.runTool('fake',{argv:[],screenshot:false},{...options,timeoutMs:1,terminationDeadlineMs:25});}});"
+            )
+            messages = [
+                {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate)]}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate)]}},
+                },
+            ]
+            environment = os.environ.copy()
+            environment["PLUGIN_DATA"] = os.fspath(data_root)
+            completed = subprocess.run(
+                [NODE or "node", "-e", script, os.fspath(LAUNCHER), os.fspath(RUNNER), os.fspath(capture)],
+                cwd=ROOT,
+                env=environment,
+                input=b"\n".join(json.dumps(message).encode() for message in messages) + b"\n",
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            responses = [json.loads(line) for line in completed.stdout.splitlines()]
+            self.assertTrue(responses[1]["result"]["isError"])
+            self.assertTrue(responses[2]["result"]["isError"])
+            self.assertIn("poisoned", responses[2]["result"]["content"][0]["text"].lower())
+            self.assertEqual(json.loads(capture.read_text(encoding="utf-8"))["executions"], 1)
+
+    def test_read_only_commands_do_not_require_core_mutation_authority(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            candidate = candidate_root / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            capture = base / "read-only.json"
+            commands = [
+                ["validate", os.fspath(candidate)],
+                ["get", os.fspath(candidate), "/Sheet1/A1"],
+                ["query", os.fspath(candidate), "cell"],
+                ["view", os.fspath(candidate), "stats"],
+                ["view", os.fspath(candidate), "screenshot"],
+            ]
+            messages = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]
+            messages.extend(
+                {
+                    "jsonrpc": "2.0",
+                    "id": index + 2,
+                    "method": "tools/call",
+                    "params": {"name": "officecli", "arguments": {"command": command}},
+                }
+                for index, command in enumerate(commands)
+            )
+            payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
+            completed = run_adapter(payload, data_root, base, capture)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            responses = [json.loads(line) for line in completed.stdout.splitlines()]
+            self.assertEqual([response["id"] for response in responses], list(range(1, 7)))
+            self.assertTrue(all(not response["result"].get("isError", False) for response in responses[1:]))
+            self.assertEqual(json.loads(capture.read_text(encoding="utf-8"))["calls"], len(commands))
 
     def test_runner_child_environment_replaces_all_officecli_case_variants(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -806,6 +1194,30 @@ class OfficeCLICase(unittest.TestCase):
                     if os.path.lexists(junction):
                         os.rmdir(junction)
 
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point timeout is Windows-specific")
+    def test_windows_reparse_probe_is_timeout_bounded(self) -> None:
+        script = (
+            "const paths=require(process.argv[1]);let options;"
+            "paths.windowsReparsePoints([process.argv[2]],(_command,_arguments,value)=>{"
+            "options=value;return {status:0,stdout:'[false]'};});"
+            "process.stdout.write(JSON.stringify({timeout:options.timeout}));"
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            target = Path(temporary) / "regular"
+            target.mkdir()
+            completed = subprocess.run(
+                [NODE or "node", "-e", script, os.fspath(PATHS), os.fspath(target)],
+                cwd=ROOT,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            timeout = json.loads(completed.stdout)["timeout"]
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 5_000)
+
     def test_policy_rejects_case_and_option_smuggling_in_get_selector(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary) / "plugin-data"
@@ -1307,6 +1719,39 @@ class OfficeCLICase(unittest.TestCase):
         )
         self.assertEqual(adapter.returncode, 2)
         self.assertIn("PLUGIN_DATA", adapter.stderr)
+
+    def test_claude_plugin_data_alone_does_not_authorize_owned_runtime_paths(self) -> None:
+        self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "claude-only-data"
+            environment = os.environ.copy()
+            environment.pop("PLUGIN_DATA", None)
+            environment["CLAUDE_PLUGIN_DATA"] = os.fspath(data_root)
+            manager = subprocess.run(
+                [sys.executable, os.fspath(MANAGER), "status"],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(manager.returncode, 2)
+            self.assertIn("PLUGIN_DATA", json.loads(manager.stdout)["error"])
+            adapter = subprocess.run(
+                [NODE or "node", os.fspath(LAUNCHER)],
+                cwd=ROOT,
+                env=environment,
+                input="",
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(adapter.returncode, 2)
+        self.assertIn("PLUGIN_DATA", adapter.stderr)
+        for owned in (LAUNCHER, PATHS, ROOT / "scripts" / "officecli_runtime.py"):
+            self.assertNotIn("CLAUDE_PLUGIN_DATA", owned.read_text(encoding="utf-8"))
 
     def test_adapter_rejects_linked_runtime_ancestors_before_checksum(self) -> None:
         self.assertIsNotNone(NODE, "Node.js is required for the OfficeCLI adapter tests")

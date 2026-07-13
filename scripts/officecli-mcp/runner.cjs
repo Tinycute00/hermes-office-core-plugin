@@ -41,10 +41,11 @@ const MAX_CANDIDATE_FILES = 32;
 const MAX_CANDIDATE_BYTES = 2 * 1024 * 1024 * 1024;
 
 class RunnerError extends Error {
-  constructor(message, stdout = Buffer.alloc(0), stderr = Buffer.alloc(0)) {
+  constructor(message, stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), terminationUnconfirmed = false) {
     super(message);
     this.stdout = stdout;
     this.stderr = stderr;
+    this.terminationUnconfirmed = terminationUnconfirmed;
   }
 }
 
@@ -95,6 +96,84 @@ function assertCandidateQuota() {
   const usage = candidateUsage();
   if (usage.files > MAX_CANDIDATE_FILES || usage.bytes > MAX_CANDIDATE_BYTES) {
     throw new RunnerError("Managed OfficeCLI candidate limits are exhausted.");
+  }
+}
+
+function samePath(left, right) {
+  return process.platform === "win32"
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right;
+}
+
+function canonicalAuthorizedRun(authority) {
+  if (!authority || typeof authority !== "object" || typeof authority.runDirectory !== "string" || typeof authority.candidate !== "string") {
+    throw new RunnerError("Authorized Core candidate run is invalid.");
+  }
+  const root = candidateRoot();
+  if (linkedAncestor(root)) throw new RunnerError("Candidate root is linked or invalid.");
+  const rootStatus = fs.lstatSync(root);
+  if (!rootStatus.isDirectory() || isLinklike(root, rootStatus)) throw new RunnerError("Candidate root is linked or invalid.");
+  const lexicalRun = path.resolve(authority.runDirectory);
+  const lexicalCandidate = path.resolve(authority.candidate);
+  if (!isContained(root, lexicalRun) || !isContained(lexicalRun, lexicalCandidate) || !/^[0-9a-f]{32}$/.test(path.basename(lexicalRun))) {
+    throw new RunnerError("Authorized Core candidate run is outside managed staging.");
+  }
+  const runStatus = fs.lstatSync(lexicalRun);
+  const candidateStatus = fs.lstatSync(lexicalCandidate);
+  if (
+    !runStatus.isDirectory()
+    || isLinklike(lexicalRun, runStatus)
+    || !candidateStatus.isFile()
+    || isLinklike(lexicalCandidate, candidateStatus)
+    || candidateStatus.nlink > 1
+  ) {
+    throw new RunnerError("Authorized Core candidate run is linked or invalid.");
+  }
+  const canonicalRoot = fs.realpathSync.native(root);
+  const canonicalRun = fs.realpathSync.native(lexicalRun);
+  const canonicalCandidate = fs.realpathSync.native(lexicalCandidate);
+  if (!samePath(path.dirname(canonicalRun), canonicalRoot) || !isContained(canonicalRun, canonicalCandidate)) {
+    throw new RunnerError("Authorized Core candidate run escapes managed staging.");
+  }
+  return { candidate: canonicalCandidate, runDirectory: canonicalRun };
+}
+
+function cleanupAuthorizedRun(authority) {
+  const authorized = canonicalAuthorizedRun(authority);
+  const pending = [authorized.runDirectory];
+  const files = [];
+  const directories = [];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    const entries = fs.readdirSync(directory).map((name) => path.join(directory, name));
+    const statuses = entries.map((entry) => fs.lstatSync(entry));
+    const reparsePoints = windowsReparsePoints(entries);
+    for (const [index, entry] of entries.entries()) {
+      const status = statuses[index];
+      if (isLinklike(entry, status, reparsePoints)) throw new RunnerError("Authorized Core candidate run contains a link or reparse point.");
+      const realEntry = fs.realpathSync.native(entry);
+      if (!isContained(authorized.runDirectory, realEntry)) throw new RunnerError("Authorized Core candidate run escapes managed staging.");
+      if (status.isDirectory()) {
+        directories.push(realEntry);
+        pending.push(realEntry);
+      } else if (status.isFile()) {
+        if (status.nlink > 1) throw new RunnerError("Authorized Core candidate run contains a hard-linked file.");
+        files.push(realEntry);
+      } else {
+        throw new RunnerError("Authorized Core candidate run contains an invalid entry.");
+      }
+    }
+  }
+  for (const file of files) {
+    if (!samePath(file, authorized.candidate)) fs.unlinkSync(file);
+  }
+  for (const directory of directories.sort((left, right) => right.length - left.length)) {
+    if (isContained(directory, authorized.candidate)) continue;
+    try {
+      fs.rmdirSync(directory);
+    } catch (error) {
+      if (error.code !== "ENOTEMPTY") throw error;
+    }
   }
 }
 
@@ -160,6 +239,7 @@ function runProcess(binary, argv, timeoutMs, terminationDeadlineMs = CONSTANTS.t
     let stderrSize = 0;
     let failure = null;
     let killPromise = Promise.resolve();
+    let terminationUnconfirmed = false;
     let terminalTimer = null;
     let settled = false;
     let timer = null;
@@ -170,17 +250,27 @@ function runProcess(binary, argv, timeoutMs, terminationDeadlineMs = CONSTANTS.t
       clearTimeout(terminalTimer);
       callback();
     };
-    const failureResult = (message) => {
+    const failureResult = (message, unconfirmed = false) => {
       const stdout = Buffer.concat(stdoutChunks);
       const stderr = Buffer.concat(stderrChunks);
-      finish(() => reject(new RunnerError(message, stdout, stderr)));
+      finish(() => reject(new RunnerError(message, stdout, stderr, unconfirmed || terminationUnconfirmed)));
     };
     const stop = (reason) => {
       if (failure !== null) return;
       failure = reason;
-      killPromise = killTree(child, terminationDeadlineMs);
+      killPromise = killTree(child, terminationDeadlineMs).then(
+        (terminated) => {
+          if (!terminated) terminationUnconfirmed = true;
+          return terminated;
+        },
+        () => {
+          terminationUnconfirmed = true;
+          return false;
+        },
+      );
       terminalTimer = setTimeout(() => {
-        failureResult(`${reason} Process termination did not complete.`);
+        terminationUnconfirmed = true;
+        failureResult(`${reason} Process termination did not complete.`, true);
       }, terminationDeadlineMs);
     };
     timer = setTimeout(() => stop("OfficeCLI command timed out."), timeoutMs);
@@ -200,7 +290,7 @@ function runProcess(binary, argv, timeoutMs, terminationDeadlineMs = CONSTANTS.t
       const stdout = Buffer.concat(stdoutChunks);
       const stderr = Buffer.concat(stderrChunks);
       if (failure !== null) {
-        finish(() => reject(new RunnerError(failure, stdout, stderr)));
+        finish(() => reject(new RunnerError(failure, stdout, stderr, terminationUnconfirmed)));
       } else {
         finish(() => resolve({ code: code === null ? 1 : code, stdout, stderr }));
       }
@@ -224,20 +314,24 @@ function commandArguments(argv, output) {
   return command;
 }
 
-async function runWithinCandidateQuota(binary, argv, timeoutMs) {
+async function runWithinCandidateQuota(binary, argv, timeoutMs, options = {}) {
   assertCandidateQuota();
+  let completed;
+  let failure = null;
   try {
-    const completed = await runProcess(binary, argv, timeoutMs);
-    assertCandidateQuota();
-    return completed;
+    completed = await runProcess(binary, argv, timeoutMs, options.terminationDeadlineMs || CONSTANTS.terminationGraceMs);
   } catch (error) {
-    try {
-      assertCandidateQuota();
-    } catch (quotaError) {
-      throw quotaError;
-    }
-    throw error;
+    failure = error;
   }
+  try {
+    assertCandidateQuota();
+  } catch (quotaError) {
+    if (!options.authority) throw quotaError;
+    cleanupAuthorizedRun(options.authority);
+    assertCandidateQuota();
+  }
+  if (failure) throw failure;
+  return completed;
 }
 
 function assertPng(output) {
@@ -318,7 +412,7 @@ async function runScreenshot(binary, parsed, options) {
   const output = path.join(temporary, "render.png");
   let failure = null;
   try {
-    const completed = await runWithinCandidateQuota(binary, commandArguments(parsed.argv, output), options.timeoutMs || CONSTANTS.screenshotTimeoutMs);
+    const completed = await runWithinCandidateQuota(binary, commandArguments(parsed.argv, output), options.timeoutMs || CONSTANTS.screenshotTimeoutMs, options);
     if (completed.code !== 0) throw new RunnerError(`OfficeCLI exited with code ${completed.code}.`, completed.stdout, completed.stderr);
     const data = assertPng(output);
     return { content: [{ type: "image", data: data.toString("base64"), mimeType: "image/png" }] };
@@ -337,11 +431,16 @@ async function runScreenshot(binary, parsed, options) {
 async function runTool(binary, parsed, options = {}) {
   try {
     if (parsed.screenshot) return await runScreenshot(binary, parsed, options);
-    const completed = await runWithinCandidateQuota(binary, parsed.argv, options.timeoutMs || CONSTANTS.normalTimeoutMs);
+    const completed = await runWithinCandidateQuota(binary, parsed.argv, options.timeoutMs || CONSTANTS.normalTimeoutMs, options);
     const text = [completed.stdout, completed.stderr].filter((value) => value.length > 0).map((value) => value.toString("utf8")).join("\n").trim();
     return { content: [{ type: "text", text: text || `OfficeCLI exited with code ${completed.code}.` }], isError: completed.code !== 0 };
   } catch (error) {
-    if (error instanceof RunnerError) return { content: [{ type: "text", text: diagnosticText(error) }], isError: true };
+    if (error instanceof RunnerError) {
+      if (error.terminationUnconfirmed && typeof options.onTerminationUnconfirmed === "function") {
+        options.onTerminationUnconfirmed();
+      }
+      return { content: [{ type: "text", text: diagnosticText(error) }], isError: true };
+    }
     throw error;
   }
 }

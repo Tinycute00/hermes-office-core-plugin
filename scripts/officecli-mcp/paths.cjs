@@ -5,12 +5,13 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const REPARSE_PATHS_ENV = "OFFICE_OS_REPARSE_PATHS";
+const REPARSE_PROBE_TIMEOUT_MS = 2_000;
 const POWERSHELL_REPARSE_COMMAND = "$ErrorActionPreference='Stop';$items=(ConvertFrom-Json -InputObject $env:OFFICE_OS_REPARSE_PATHS).paths;$flags=@(foreach($itemPath in $items){$item=Get-Item -Force -LiteralPath $itemPath;[bool](($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)});[Console]::Out.Write((ConvertTo-Json -InputObject @($flags) -Compress))";
 
 class PathPolicyError extends Error {}
 
 function dataRoot() {
-  const data = process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
+  const data = process.env.PLUGIN_DATA;
   if (!data) throw new PathPolicyError("OfficeCLI requires the plugin-owned PLUGIN_DATA value.");
   return path.resolve(data);
 }
@@ -40,6 +41,7 @@ function windowsReparsePoints(targets, execute = spawnSync) {
     encoding: "utf8",
     env: { ...process.env, [REPARSE_PATHS_ENV]: JSON.stringify({ paths: values }) },
     shell: false,
+    timeout: REPARSE_PROBE_TIMEOUT_MS,
     windowsHide: true,
   });
   if (result.error || result.status !== 0) throw new PathPolicyError("Could not inspect Windows reparse-point attributes.");

@@ -8,6 +8,7 @@ const { InvalidParamsError, runProtocol } = require("./officecli-mcp/jsonrpc.cjs
 const { PathPolicyError, isLinklike, linkedAncestor } = require("./officecli-mcp/paths.cjs");
 const { PolicyError, TOOL, parseToolArguments } = require("./officecli-mcp/policy.cjs");
 const { runTool } = require("./officecli-mcp/runner.cjs");
+const { CoreRunAuthorityError, MUTABLE_COMMANDS, authorizeMutation } = require("./officecli-mcp/authority.cjs");
 
 const root = path.resolve(__dirname, "..");
 const lockPath = path.join(root, "vendor", "officecli.lock.json");
@@ -48,7 +49,7 @@ function loadLock() {
 }
 
 function pluginDataRoot() {
-  const configured = process.env.PLUGIN_DATA || process.env.CLAUDE_PLUGIN_DATA;
+  const configured = process.env.PLUGIN_DATA;
   if (!configured) throw new RuntimeIntegrityError("OfficeCLI requires the plugin-owned PLUGIN_DATA value");
   return path.resolve(configured);
 }
@@ -130,18 +131,24 @@ function toolFailure(message) {
 function start(dependencies = {}) {
   const verifyRuntime = dependencies.verifyRuntime || verifyManagedRuntime;
   const execute = dependencies.execute || runTool;
+  let sessionPoisoned = false;
   verifyRuntime();
   runProtocol({
     serverInfo: { name: "office-os-officecli", version: VERSION },
     tool: TOOL,
     callTool: async (argumentsValue) => {
+      if (sessionPoisoned) return toolFailure("OfficeCLI MCP session is poisoned after unconfirmed process-tree termination.");
       if (!validArgumentShape(argumentsValue)) throw new InvalidParamsError("command must be an array of 1-128 strings");
       try {
         const parsed = parseToolArguments(argumentsValue);
+        const authority = MUTABLE_COMMANDS.has(parsed.argv[0]) ? authorizeMutation(parsed.argv[1]) : null;
         const binary = verifyRuntime();
-        return await execute(binary, parsed);
+        return await execute(binary, parsed, {
+          ...(authority ? { authority } : {}),
+          onTerminationUnconfirmed: () => { sessionPoisoned = true; },
+        });
       } catch (error) {
-        if (error instanceof PolicyError || error instanceof PathPolicyError || error instanceof RuntimeIntegrityError) {
+        if (error instanceof PolicyError || error instanceof PathPolicyError || error instanceof RuntimeIntegrityError || error instanceof CoreRunAuthorityError) {
           return toolFailure(error.message);
         }
         throw error;

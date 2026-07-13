@@ -48,7 +48,7 @@ def load_lock() -> dict:  # noqa: DICT_OK
 
 
 def plugin_data_root() -> Path:
-    configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
+    configured = os.environ.get("PLUGIN_DATA")
     if not configured:
         raise OfficeCLIManagerError("OfficeCLI requires the hook-injected PLUGIN_DATA value.")
     selected = Path(configured).expanduser()
