@@ -1733,6 +1733,41 @@ class CoreCase(unittest.TestCase):
         self.assertNotIn("error", authority)
         self.assertEqual(Path(authority["run"]["candidate"]), candidate.resolve())
 
+    def test_workspace_retention_refuses_a_new_state_when_all_slots_are_active(
+        self,
+    ) -> None:
+        # Given: all bounded workspace slots contain active runs, including this workspace.
+        module = load_core_module()
+        workspaces = self.plugin_data / "workspaces"
+        workspaces.mkdir(parents=True)
+        current_id = hashlib.sha256(
+            module.canonical_workspace(self.workspace).encode("utf-8")
+        ).hexdigest()[:24]
+        active_state = json.dumps({"status": "executing"})
+        for number in range(module.MAX_WORKSPACE_STATES):
+            name = current_id if number == 0 else f"active-{number:03d}"
+            directory = workspaces / name
+            directory.mkdir()
+            (directory / "run_state.json").write_text(active_state, encoding="utf-8")
+
+        # When: the existing workspace is reopened, then a distinct workspace requests state.
+        new_workspace = self.base / "new-workspace"
+        new_workspace.mkdir()
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            reopened = module.get_workspace_dir(self.workspace)
+            with self.assertRaisesRegex(
+                module.OfficeOSError, "workspace state limit"
+            ):
+                module.get_workspace_dir(new_workspace)
+
+        # Then: the active workspace remains usable and no 257th directory is created.
+        self.assertEqual(reopened, workspaces / current_id)
+        self.assertEqual(len(list(workspaces.iterdir())), module.MAX_WORKSPACE_STATES)
+        new_id = hashlib.sha256(
+            module.canonical_workspace(new_workspace).encode("utf-8")
+        ).hexdigest()[:24]
+        self.assertFalse((workspaces / new_id).exists())
+
     def test_begin_reserves_candidate_directory_before_first_publish(self) -> None:
         first_workspace = self.workspace
         source = first_workspace / "source.xlsx"

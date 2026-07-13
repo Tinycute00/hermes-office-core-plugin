@@ -363,7 +363,9 @@ def remove_inactive_workspace_state(directory: Path) -> None:
             ) from error
 
 
-def prune_inactive_workspace_states(workspaces: Path, current: Path) -> None:
+def prune_inactive_workspace_states(
+    workspaces: Path, current: Path, limit: int = MAX_WORKSPACE_STATES
+) -> int:
     try:
         entries = list(workspaces.iterdir())
     except OSError as error:
@@ -382,32 +384,43 @@ def prune_inactive_workspace_states(workspaces: Path, current: Path) -> None:
             inactive.append((status.st_mtime_ns, workspace.name, workspace))
     remaining = len(entries)
     for _modified, _name, workspace in sorted(inactive):
-        if remaining <= MAX_WORKSPACE_STATES:
+        if remaining <= limit:
             break
         remove_inactive_workspace_state(workspace)
         remaining -= 1
+    return remaining
 
 
 def get_workspace_dir(cwd: str | Path | None = None) -> Path:
     canonical = canonical_workspace(cwd)
     workspace_id = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
     root = ensure_plugin_data_root()
-    workspaces = root / "workspaces"
-    if os.path.lexists(workspaces):
-        if is_linklike(workspaces) or not workspaces.is_dir():
-            raise OfficeOSError("Office OS workspace state root is linked or invalid.")
-    else:
-        workspaces.mkdir()
-    directory = workspaces / workspace_id
-    if os.path.lexists(directory):
-        if is_linklike(directory) or not directory.is_dir():
-            raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
-    else:
-        directory.mkdir()
-    if directory.resolve(strict=True).parent != workspaces.resolve(strict=True):
-        raise OfficeOSError("Office OS workspace state entry escapes plugin data.")
-    prune_inactive_workspace_states(workspaces, directory)
-    return directory
+    with state_lock(root):
+        workspaces = root / "workspaces"
+        if os.path.lexists(workspaces):
+            if is_linklike(workspaces) or not workspaces.is_dir():
+                raise OfficeOSError("Office OS workspace state root is linked or invalid.")
+        else:
+            workspaces.mkdir()
+        directory = workspaces / workspace_id
+        exists = os.path.lexists(directory)
+        if exists:
+            if is_linklike(directory) or not directory.is_dir():
+                raise OfficeOSError("Office OS workspace state entry is linked or invalid.")
+            prune_inactive_workspace_states(workspaces, directory)
+        else:
+            remaining = prune_inactive_workspace_states(
+                workspaces, directory, MAX_WORKSPACE_STATES - 1
+            )
+            if remaining >= MAX_WORKSPACE_STATES:
+                raise OfficeOSError(
+                    "Office OS workspace state limit is full; complete or fail an active "
+                    "run before starting work in another workspace."
+                )
+            directory.mkdir()
+        if directory.resolve(strict=True).parent != workspaces.resolve(strict=True):
+            raise OfficeOSError("Office OS workspace state entry escapes plugin data.")
+        return directory
 
 
 def read_json(path: Path, default: Any) -> Any:
