@@ -145,7 +145,21 @@ class HookCase(unittest.TestCase):
         )
         self.assertIn("<required-final-reply>", context)
         self.assertIn("</required-final-reply>", context)
+        self.assertIn("<required-first-user-visible-line>", context)
+        self.assertIn("</required-first-user-visible-line>", context)
+        self.assertIn(
+            "The first user-visible text line MUST equal the supplied line verbatim",
+            context,
+        )
+        self.assertIn(
+            "If the host requires a skill-use announcement, that exact line must be the entire announcement",
+            context,
+        )
         self.assertIn("Get-Content -Raw -Encoding UTF8", context)
+        self.assertIn(
+            "The first Windows PowerShell read of SKILL.md must use explicit UTF-8",
+            context,
+        )
         self.assertIn("Never rely on default Windows PowerShell decoding", context)
         self.assertIn(
             "Copy the two lines inside <required-final-reply> verbatim as the entire final reply",

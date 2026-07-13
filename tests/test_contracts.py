@@ -84,12 +84,13 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "Source-free Office intake: return one self-contained two-line final reply"
+                "Source-free Office intake: first visible line is the exact hook-supplied intent envelope"
             ),
             description,
         )
+        self.assertIn("first Windows skill read uses explicit UTF-8", description)
+        self.assertIn("final reply repeats the envelope", description)
         self.assertIn("intent envelope, then source-path question", description)
-        self.assertIn("explicit UTF-8 on Windows", description)
         self.assertNotIn("Prefer", description)
         self.assertIn("No Office data work before source", description)
 
@@ -156,9 +157,22 @@ class ContractCase(unittest.TestCase):
                 text,
             )
             self.assertIn("<required-final-reply>", text)
+            self.assertIn("<required-first-user-visible-line>", text)
+            self.assertIn(
+                "first user-visible text line must equal the supplied intent envelope verbatim",
+                text.lower(),
+            )
+            self.assertIn(
+                "If the host requires a skill-use announcement, use exactly that envelope line as the entire announcement",
+                text,
+            )
             self.assertIn("copy", text.lower())
             self.assertIn("verbatim", text)
             self.assertIn("Get-Content -Raw -Encoding UTF8", text)
+            self.assertIn(
+                "first Windows PowerShell read of SKILL.md must use explicit UTF-8",
+                text,
+            )
             self.assertNotIn("Prefer the canonical envelope", text)
 
     def test_readme_describes_source_free_intake_as_classification_first(self) -> None:
