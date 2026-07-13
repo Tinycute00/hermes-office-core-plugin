@@ -352,9 +352,7 @@ def prompt_reference(prompt: str) -> tuple[str, ...]:
         "PowerPoint": "PowerPoint.md",
         "PDF": "PDF.md",
     }[hints[0]]
-    if SCHEDULE_PATTERN.search(cleaned):
-        return (object_reference, "Office.md")
-    return (object_reference,)
+    return ("Office.md", object_reference)
 
 
 def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bool:

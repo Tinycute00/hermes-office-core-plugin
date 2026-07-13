@@ -102,6 +102,7 @@ class HookCase(unittest.TestCase):
         context = first["hookSpecificOutput"]["additionalContext"]
         self.assertIn("$office-os", context)
         self.assertIn("Excel.md", context)
+        self.assertIn("Office.md", context)
         self.assertIn("意圖：<值>", context)
         self.assertIn("PLUGIN_DATA", context)
         self.assertIn(os.fspath(self.plugin_data), context)

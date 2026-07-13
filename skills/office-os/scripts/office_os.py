@@ -39,6 +39,8 @@ from office_candidate_runs import active_run_candidate_paths
 from office_candidate_runs import remove_candidate_directory
 from office_candidate_runs import reserve_candidate_directory
 from office_candidate_runs import validated_run_candidate
+from office_openxml_index import IndexPackageLimitError, IndexPackageLimits
+from office_openxml_index import open_index_package
 from office_openxml import OpenXMLValidationError, validate_openxml
 from office_state import StateLeafError, ensure_private_state_leaf
 from office_state import open_private_state_leaf, unlink_private_state_leaf
@@ -69,10 +71,20 @@ OUTPUT_DIRECTORY_NAME = "Office OS Output"
 BACKUP_COUNT = 3
 MAX_PUBLISH_RECORDS = 256
 MAX_FULL_TEXT_ROOTS = 32
+MAX_KNOWLEDGE_DOCUMENTS = 256
+MAX_KNOWLEDGE_CHUNKS = 4_096
+MAX_KNOWLEDGE_TEXT_BYTES = 16 * 1024 * 1024
+MAX_INDEX_PACKAGE_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_INDEX_PACKAGE_MEMBERS = 10_000
+MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_PACKAGE_MEMBERS = 10_000
 MAX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_INDEX_PACKAGE_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_INDEX_PACKAGE_COMPRESSION_RATIO = 100
 MAX_QUERY_RESULTS = 100
 MAX_QUERY_TEXT_CHARS = 8_000
+MAX_RUN_UNITS = 10_000
+MAX_PROGRESS_MARKER_BYTES = 512
 LOCK_STALE_SECONDS = 6 * 60 * 60
 TEMP_PREFIX = ".office-os-"
 FULL_TEXT_ROOTS_SETTING = "full_text_roots"
@@ -83,6 +95,7 @@ SENSITIVE_PATTERN = re.compile(
 ACTIVE_RUN_STATUSES = {
     "grounding",
     "agreed",
+    "awaiting_confirmation",
     "executing",
     "validating",
     "publishing",
@@ -521,15 +534,35 @@ def natural_part_key(name: str) -> tuple[Any, ...]:
     )
 
 
+@contextlib.contextmanager
+def bounded_index_package(path: Path) -> Iterator[zipfile.ZipFile]:
+    """Expose an Open XML package after fixed index resource checks."""
+
+    limits = IndexPackageLimits(
+        max_archive_bytes=MAX_INDEX_PACKAGE_ARCHIVE_BYTES,
+        max_members=MAX_INDEX_PACKAGE_MEMBERS,
+        max_member_bytes=MAX_INDEX_PACKAGE_MEMBER_BYTES,
+        max_uncompressed_bytes=MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES,
+        max_compression_ratio=MAX_INDEX_PACKAGE_COMPRESSION_RATIO,
+    )
+    try:
+        with open_index_package(path, limits) as package:
+            yield package
+    except IndexPackageLimitError as error:
+        raise OfficeOSError(str(error)) from error
+
+
 def detect_sensitivity(path: Path) -> tuple[str, str]:
     extension = path.suffix.lower()
+    if extension in READ_ONLY_EXTENSIONS:
+        return "metadata-only", "read-only extension"
     if extension in MACRO_EXTENSIONS:
         return "metadata-only", "macro-enabled extension"
     if SENSITIVE_PATTERN.search(os.fspath(path)):
         return "metadata-only", "protected path or filename"
     if extension in READ_WRITE_EXTENSIONS:
         try:
-            with zipfile.ZipFile(path) as package:
+            with bounded_index_package(path) as package:
                 names = [name.lower() for name in package.namelist()]
                 if any("vbaproject.bin" in name for name in names):
                     return "metadata-only", "VBA project part"
@@ -550,20 +583,10 @@ def detect_sensitivity(path: Path) -> tuple[str, str]:
                     raw = package.read(part).decode("utf-8", errors="ignore")
                     if SENSITIVE_PATTERN.search(raw):
                         return "metadata-only", "sensitivity property"
+        except OfficeOSError:
+            return "metadata-only", "index limit"
         except (OSError, zipfile.BadZipFile):
             return "metadata-only", "encrypted or unreadable Open XML package"
-    if extension == ".pdf":
-        try:
-            from pypdf import PdfReader
-            from pypdf.errors import PyPdfError
-
-            reader = PdfReader(path)
-            if reader.is_encrypted:
-                return "metadata-only", "encrypted PDF"
-        except ImportError:
-            return "normal", ""
-        except (OSError, ValueError, PyPdfError):
-            return "normal", ""
     return "normal", ""
 
 
@@ -627,7 +650,7 @@ def split_text_chunks(
 
 def extract_docx(path: Path) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    with zipfile.ZipFile(path) as package:
+    with bounded_index_package(path) as package:
         root = ET.fromstring(package.read("word/document.xml"))
         body = next((item for item in root.iter() if local_name(item.tag) == "body"), root)
         sections: list[tuple[str, list[str]]] = []
@@ -708,7 +731,7 @@ def extract_docx(path: Path) -> list[dict[str, Any]]:
 
 def extract_pptx(path: Path) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    with zipfile.ZipFile(path) as package:
+    with bounded_index_package(path) as package:
         names = set(package.namelist())
         slide_parts = sorted(
             [
@@ -789,7 +812,7 @@ def relationship_map(package: zipfile.ZipFile, part: str) -> dict[str, str]:
 
 def extract_xlsx(path: Path) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    with zipfile.ZipFile(path) as package:
+    with bounded_index_package(path) as package:
         shared = read_shared_strings(package)
         workbook_part = "xl/workbook.xml"
         root = ET.fromstring(package.read(workbook_part))
@@ -892,44 +915,6 @@ def extract_xlsx(path: Path) -> list[dict[str, Any]]:
     return results
 
 
-def extract_pdf(path: Path) -> list[dict[str, Any]]:
-    try:
-        from pypdf import PdfReader
-        from pypdf.errors import PyPdfError
-    except ImportError as error:
-        raise OfficeOSError(
-            "PDF text extraction requires the bundled pypdf library; metadata was still indexed."
-        ) from error
-    try:
-        reader = PdfReader(path)
-        if reader.is_encrypted:
-            raise OfficeOSError("Encrypted PDF content is metadata-only.")
-        results: list[dict[str, Any]] = []
-        page_buffer: list[str] = []
-        page_start = 1
-        ordinal = 0
-        for index, page in enumerate(reader.pages, start=1):
-            text = (page.extract_text() or "").strip()
-            if text:
-                page_buffer.append(f"[Page {index}]\n{text}")
-            if len("\n\n".join(page_buffer)) >= 12000 or index == len(reader.pages):
-                if page_buffer:
-                    results.append(
-                        chunk(
-                            ordinal,
-                            f"pages={page_start}-{index}",
-                            f"Pages {page_start}-{index}",
-                            "\n\n".join(page_buffer),
-                        )
-                    )
-                    ordinal += 1
-                page_buffer = []
-                page_start = index + 1
-        return results
-    except PyPdfError as error:
-        raise OfficeOSError(f"PDF text extraction failed: {error}") from error
-
-
 def extract_chunks(path: Path) -> list[dict[str, Any]]:
     extension = path.suffix.lower()
     try:
@@ -939,8 +924,6 @@ def extract_chunks(path: Path) -> list[dict[str, Any]]:
             return extract_pptx(path)
         if extension == ".xlsx":
             return extract_xlsx(path)
-        if extension == ".pdf":
-            return extract_pdf(path)
     except (KeyError, UnicodeError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
         raise OfficeOSError(f"Could not extract {extension} content: {error}") from error
     raise OfficeOSError(f"Content extraction requires conversion for {extension}.")
@@ -1060,6 +1043,7 @@ def connect_database(directory: Path) -> sqlite3.Connection:
         connection.execute(
             "INSERT OR REPLACE INTO settings(key, value) VALUES('fts_tokenizer', 'unicode61-fallback')"
         )
+    trim_knowledge_map(connection)
     connection.commit()
     validate_database_state_leaves(directory)
     return connection
@@ -1070,6 +1054,57 @@ def close_database(connection: sqlite3.Connection, directory: Path) -> None:
         validate_database_state_leaves(directory)
     finally:
         connection.close()
+
+
+def bounded_document_chunks(chunks: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    retained: list[dict[str, Any]] = []
+    text_bytes = 0
+    for item in chunks:
+        item_text_bytes = len(item["text"].encode("utf-8"))
+        if len(retained) >= MAX_KNOWLEDGE_CHUNKS:
+            break
+        if text_bytes + item_text_bytes > MAX_KNOWLEDGE_TEXT_BYTES:
+            break
+        retained.append(item)
+        text_bytes += item_text_bytes
+    return retained
+
+
+def trim_knowledge_map(connection: sqlite3.Connection) -> int:
+    rows = connection.execute(
+        """
+        SELECT
+            d.id,
+            COUNT(c.id) AS chunk_count,
+            COALESCE(SUM(LENGTH(CAST(c.text AS BLOB))), 0) AS text_bytes
+        FROM documents AS d
+        LEFT JOIN chunks AS c ON c.document_id = d.id
+        GROUP BY d.id
+        ORDER BY d.mtime_ns DESC, d.path ASC
+        """
+    ).fetchall()
+    retained_documents = 0
+    retained_chunks = 0
+    retained_text_bytes = 0
+    eviction_ids: list[int] = []
+    for row in rows:
+        chunk_count = int(row["chunk_count"])
+        text_bytes = int(row["text_bytes"])
+        over_capacity = (
+            retained_documents >= MAX_KNOWLEDGE_DOCUMENTS
+            or retained_chunks + chunk_count > MAX_KNOWLEDGE_CHUNKS
+            or retained_text_bytes + text_bytes > MAX_KNOWLEDGE_TEXT_BYTES
+        )
+        if over_capacity:
+            eviction_ids.append(int(row["id"]))
+            continue
+        retained_documents += 1
+        retained_chunks += chunk_count
+        retained_text_bytes += text_bytes
+    for document_id in eviction_ids:
+        connection.execute("DELETE FROM chunk_fts WHERE document_id = ?", (document_id,))
+        connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+    return len(eviction_ids)
 
 
 def ignored_path(path: Path) -> bool:
@@ -1114,6 +1149,32 @@ def path_is_under(path: Path, root: Path) -> bool:
         return os.path.normcase(common) == os.path.normcase(os.fspath(root))
     except ValueError:
         return False
+
+
+def validated_cleanup_root(cwd: str | None, requested: str | None) -> Path:
+    lexical_workspace = Path(os.path.abspath(cwd or os.getcwd()))
+    lexical_root = Path(os.path.abspath(requested or lexical_workspace))
+    if not path_is_under(lexical_root, lexical_workspace):
+        raise OfficeOSError("Office cleanup root is outside the configured workspace.")
+    try:
+        relative = lexical_root.relative_to(lexical_workspace)
+    except ValueError as error:
+        raise OfficeOSError("Office cleanup root is outside the configured workspace.") from error
+    components = [lexical_workspace]
+    component = lexical_workspace
+    for part in relative.parts:
+        component /= part
+        components.append(component)
+    for component in components:
+        if os.path.lexists(component) and is_linklike(component):
+            raise OfficeOSError("Office cleanup root contains a linked ancestor.")
+    workspace_root = canonical_path(lexical_workspace)
+    root = canonical_path(lexical_root)
+    if not path_is_under(root, workspace_root):
+        raise OfficeOSError("Office cleanup root is outside the configured workspace.")
+    if not root.is_dir():
+        raise OfficeOSError("Office cleanup root is linked or invalid.")
+    return root
 
 
 def load_full_text_roots(
@@ -1185,7 +1246,8 @@ def replace_document(
     status: str,
     chunks: Sequence[dict[str, Any]],
     error: str = "",
-) -> None:
+) -> int:
+    bounded_chunks = bounded_document_chunks(chunks)
     with connection:
         connection.execute(
             """
@@ -1233,7 +1295,7 @@ def replace_document(
         )
         connection.execute("DELETE FROM chunk_fts WHERE document_id = ?", (document_id,))
         connection.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-        for item in chunks:
+        for item in bounded_chunks:
             cursor = connection.execute(
                 """
                 INSERT INTO chunks(
@@ -1262,6 +1324,7 @@ def replace_document(
                     item["text"],
                 ),
             )
+        return trim_knowledge_map(connection)
 
 
 def purge_deleted(
@@ -1326,6 +1389,7 @@ def command_index(args: argparse.Namespace) -> int:
         "unchanged": 0,
         "errors": 0,
         "purged": 0,
+        "retention_evicted": 0,
     }
     indexed_paths: set[str] = set()
     try:
@@ -1339,7 +1403,8 @@ def command_index(args: argparse.Namespace) -> int:
             )
             policy = (
                 "full-text"
-                if not args.metadata_only
+                if path.suffix.lower() not in READ_ONLY_EXTENSIONS
+                and not args.metadata_only
                 and (
                     (sensitivity == "normal" and root_allows_full_text)
                     or explicit_allow
@@ -1375,7 +1440,7 @@ def command_index(args: argparse.Namespace) -> int:
                     stats["errors"] += 1
             else:
                 stats["metadata_only"] += 1
-            replace_document(
+            stats["retention_evicted"] += replace_document(
                 connection,
                 path,
                 file_fingerprint,
@@ -1450,8 +1515,15 @@ def command_query(args: argparse.Namespace) -> int:
         filters.append("d.object_type = ?")
         parameters.append(args.object)
     if args.path_prefix:
-        filters.append("d.path LIKE ?")
-        parameters.append(os.fspath(canonical_path(args.path_prefix)) + "%")
+        path_prefix = os.fspath(canonical_path(args.path_prefix))
+        escaped_prefix = (
+            (path_prefix + os.sep)
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        filters.append("(d.path = ? OR d.path LIKE ? ESCAPE '\\')")
+        parameters.extend((path_prefix, escaped_prefix + "%"))
     filter_sql = " AND " + " AND ".join(filters) if filters else ""
     rows: list[sqlite3.Row] = []
     try:
@@ -1580,6 +1652,8 @@ def command_begin(args: argparse.Namespace) -> int:
     data_root = ensure_plugin_data_root()
     if args.units < 0:
         raise OfficeOSError("Unit count cannot be negative.")
+    if args.units > MAX_RUN_UNITS:
+        raise OfficeOSError(f"Unit count cannot exceed {MAX_RUN_UNITS}.")
     source_fingerprints = fingerprint_sources(args.source or [])
     task_key = stable_task_key(args.task)
     run_id = uuid.uuid4().hex
@@ -1623,6 +1697,7 @@ def command_begin(args: argparse.Namespace) -> int:
         try:
             with state_lock(data_root):
                 candidate_directory = reserve_candidate_directory(data_root, run_id)
+                proposal_confirmed = args.permission != "fixed-output-write"
                 state = {
                     "run_id": run_id,
                     "task_key": task_key,
@@ -1634,14 +1709,15 @@ def command_begin(args: argparse.Namespace) -> int:
                     "mode": args.mode,
                     "sources": [item.as_dict() for item in source_fingerprints],
                     "source_digest": combined_source_digest(source_fingerprints),
-                    "status": "executing",
+                    "status": "executing" if proposal_confirmed else "awaiting_confirmation",
                     "total_units": args.units,
                     "remaining_units": args.units,
                     "progress_marker": "",
                     "last_stop_marker": "",
                     "continuation_count": 0,
                     "no_progress_stops": 0,
-                    "waiting_for_user": False,
+                    "waiting_for_user": not proposal_confirmed,
+                    "proposal_confirmed": proposal_confirmed,
                     "candidate": None,
                     "candidate_directory": os.fspath(candidate_directory),
                     "candidate_cleanup": {
@@ -1670,11 +1746,39 @@ def command_progress(args: argparse.Namespace) -> int:
         state = read_run_state(directory)
         if not state:
             raise OfficeOSError("No active Office OS run.")
+        if state.get("proposal_confirmed") is False:
+            raise OfficeOSError("Progress requires one explicit proposal confirmation.")
         if args.remaining < 0:
             raise OfficeOSError("Remaining units cannot be negative.")
+        total_units = state.get("total_units")
+        if not isinstance(total_units, int) or args.remaining > total_units:
+            raise OfficeOSError("Remaining units cannot exceed the task total.")
+        if len(args.marker.encode("utf-8")) > MAX_PROGRESS_MARKER_BYTES:
+            raise OfficeOSError(
+                f"Progress marker cannot exceed {MAX_PROGRESS_MARKER_BYTES} bytes."
+            )
         state["remaining_units"] = args.remaining
         state["progress_marker"] = args.marker
         state["status"] = args.status
+        state["waiting_for_user"] = False
+        state["updated_at"] = utc_now()
+        write_json(run_state_path(directory), state)
+    json_print(state)
+    return 0
+
+
+def command_confirm(args: argparse.Namespace) -> int:
+    directory = get_workspace_dir(args.cwd)
+    with state_lock(directory):
+        state = read_run_state(directory)
+        if not state:
+            raise OfficeOSError("No active Office OS run to confirm.")
+        if state.get("permission") != "fixed-output-write":
+            raise OfficeOSError("Only a manual fixed-output run needs proposal confirmation.")
+        if state.get("status") != "awaiting_confirmation":
+            raise OfficeOSError("The active Office OS run is not awaiting confirmation.")
+        state["proposal_confirmed"] = True
+        state["status"] = "executing"
         state["waiting_for_user"] = False
         state["updated_at"] = utc_now()
         write_json(run_state_path(directory), state)
@@ -1811,13 +1915,15 @@ def output_target(
     task: str,
     requested_target: str | None,
     cwd: str | None,
+    *,
+    create_directory: bool = True,
 ) -> tuple[Path, Path]:
     parent = source.parent if source else canonical_path(cwd or os.getcwd())
     lexical_output = parent / OUTPUT_DIRECTORY_NAME
     if os.path.lexists(lexical_output):
         if is_linklike(lexical_output) or not lexical_output.is_dir():
             raise OfficeOSError("Office OS Output is linked or invalid.")
-    else:
+    elif create_directory:
         lexical_output.mkdir(parents=True)
     if is_linklike(lexical_output):
         raise OfficeOSError("Office OS Output is linked or invalid.")
@@ -1969,6 +2075,8 @@ def require_publish_authority(
         raise OfficeOSError(
             "Publishing requires a matching active Office OS run and explicit write authority."
         )
+    if state.get("permission") == "fixed-output-write" and state.get("proposal_confirmed") is not True:
+        raise OfficeOSError("Publishing requires one explicit proposal confirmation.")
     if state.get("status") not in {"executing", "validating", "publishing"}:
         raise OfficeOSError("The active Office OS run is not ready to publish.")
     required_permission = (
@@ -2012,7 +2120,12 @@ def command_needs_run(args: argparse.Namespace) -> int:
         raise OfficeOSError("Output extension must be .xlsx, .docx, or .pptx.")
     placeholder = primary_source.with_suffix(candidate_suffix)
     _, target = output_target(
-        primary_source, placeholder, args.task, args.target, args.cwd
+        primary_source,
+        placeholder,
+        args.task,
+        args.target,
+        args.cwd,
+        create_directory=False,
     )
     unchanged = source_unchanged(
         directory, task_key, target, source_fingerprints
@@ -2033,10 +2146,26 @@ def command_needs_run(args: argparse.Namespace) -> int:
 def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
     candidate_input = Path(os.path.abspath(os.fspath(args.candidate)))
     sources = [canonical_path(item) for item in (args.source or [])]
-    primary_source = sources[0] if sources else None
-    sources_before = fingerprint_sources(sources)
     task_key = stable_task_key(args.task)
     active_run = require_publish_authority(directory, task_key, args.mode)
+    expected_sources = active_run.get("sources")
+    if not isinstance(expected_sources, list):
+        raise OfficeOSError("Active run source set is invalid.")
+    expected_paths: list[str] = []
+    for source in expected_sources:
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            raise OfficeOSError("Active run source set is invalid.")
+        expected_paths.append(os.path.normcase(os.fspath(canonical_path(source["path"])))
+        )
+    actual_paths = sorted(os.path.normcase(os.fspath(source)) for source in sources)
+    if expected_paths != actual_paths:
+        raise OfficeOSError("Publish sources differ from the task-start source set.")
+    sources_before = fingerprint_sources(sources)
+    if active_run.get("source_digest") != combined_source_digest(sources_before):
+        raise OfficeOSError(
+            "A source differs from the task-start fingerprint; candidate was not published."
+        )
+    primary_source = sources[0] if sources else None
     data_root = ensure_plugin_data_root()
     try:
         candidate = validated_run_candidate(data_root, active_run, candidate_input)
@@ -2045,15 +2174,6 @@ def publish_candidate(args: argparse.Namespace, directory: Path) -> int:
     active_run["candidate"] = os.fspath(candidate)
     active_run["updated_at"] = utc_now()
     write_json(run_state_path(directory), active_run)
-    if (
-        active_run.get("task_key") == task_key
-        and active_run.get("source_digest") is not None
-        and active_run.get("source_digest")
-        != combined_source_digest(sources_before)
-    ):
-        raise OfficeOSError(
-            "A source differs from the task-start fingerprint; candidate was not published."
-        )
     output_directory, target = output_target(
         primary_source, candidate, args.task, args.target, args.cwd
     )
@@ -2170,11 +2290,7 @@ def command_publish(args: argparse.Namespace) -> int:
 def command_cleanup(args: argparse.Namespace) -> int:
     directory = get_workspace_dir(args.cwd)
     removed: list[str] = []
-    roots = (
-        [Path(os.path.abspath(args.path))]
-        if args.path
-        else [Path(os.path.abspath(args.cwd or os.getcwd()))]
-    )
+    roots = [validated_cleanup_root(args.cwd, args.path)]
     cutoff = time.time() - args.older_than_seconds
     managed = cleanup_managed_candidates(older_than_seconds=args.older_than_seconds)
     removed.extend(str(path) for path in managed["removed"])
@@ -2351,6 +2467,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     begin.add_argument("--mode", choices=["manual", "scheduled"], default="manual")
     begin.set_defaults(function=command_begin)
+
+    confirm = subparsers.add_parser(
+        "confirm", help="Confirm the one manual fixed-output proposal."
+    )
+    add_common_cwd(confirm)
+    confirm.set_defaults(function=command_confirm)
 
     progress = subparsers.add_parser("progress", help="Record real chunk progress.")
     add_common_cwd(progress)

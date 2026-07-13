@@ -250,7 +250,12 @@ class CoreCase(unittest.TestCase):
         for source in sources:
             arguments.extend(("--source", os.fspath(source)))
         state, _ = self.run_core("begin", *arguments)
-        self.assertEqual(state["status"], "executing")
+        if mode == "scheduled":
+            self.assertEqual(state["status"], "executing")
+        else:
+            self.assertEqual(state["status"], "awaiting_confirmation")
+            state, _ = self.run_core("confirm")
+            self.assertEqual(state["status"], "executing")
         return state
 
     def candidate_for(self, state: dict, name: str = "candidate.xlsx") -> Path:
@@ -340,6 +345,145 @@ class CoreCase(unittest.TestCase):
         repeated, _ = self.run_core("index", "--path", os.fspath(self.workspace))
         self.assertEqual(repeated["unchanged"], 1)
 
+    def test_query_path_prefix_is_boundary_safe_and_treats_like_tokens_literally(self) -> None:
+        scoped = self.workspace / "client_100%"
+        sibling = self.workspace / "clientX100Z"
+        write_xlsx(scoped / "owned.xlsx", "path prefix exact marker")
+        write_xlsx(sibling / "unrelated.xlsx", "path prefix exact marker")
+        self.run_core(
+            "index",
+            "--path",
+            os.fspath(self.workspace),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+
+        result, _ = self.run_core(
+            "query",
+            "--text",
+            "path prefix exact marker",
+            "--path-prefix",
+            os.fspath(scoped),
+        )
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(Path(result["results"][0]["path"]).name, "owned.xlsx")
+
+    def test_pdf_remains_metadata_only_after_full_text_root_is_granted(self) -> None:
+        pdf = self.workspace / "consented.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+
+        indexed, _ = self.run_core(
+            "index",
+            "--path",
+            os.fspath(pdf),
+            "--grant-full-text-root",
+            os.fspath(self.workspace),
+        )
+        self.assertEqual(indexed["metadata_only"], 1)
+        database = sqlite3.connect(self.workspace_data() / "office.db")
+        try:
+            row = database.execute(
+                """
+                SELECT d.index_policy, d.index_status, COUNT(c.id)
+                FROM documents AS d
+                LEFT JOIN chunks AS c ON c.document_id = d.id
+                WHERE d.extension = '.pdf'
+                GROUP BY d.id
+                """,
+            ).fetchone()
+        finally:
+            database.close()
+        self.assertEqual(row, ("metadata-only", "complete", 0))
+
+    def test_index_archive_limits_keep_oversized_open_xml_metadata_only(self) -> None:
+        module = load_core_module()
+        document = self.workspace / "limited.docx"
+        write_docx(document, "archive limit marker")
+
+        with mock.patch.object(module, "MAX_INDEX_PACKAGE_MEMBERS", 1, create=True):
+            sensitivity, reason = module.detect_sensitivity(document)
+            self.assertEqual(sensitivity, "metadata-only")
+            self.assertIn("index limit", reason)
+            with self.assertRaises(module.OfficeOSError):
+                module.extract_docx(document)
+
+    def test_knowledge_map_retention_caps_documents_chunks_and_text(self) -> None:
+        module = load_core_module()
+        directory = self.base / "knowledge-map-retention"
+        directory.mkdir()
+        now_ns = time.time_ns()
+        sources = (
+            ("oldest.xlsx", 0, ("old!",)),
+            ("middle.xlsx", 1, ("mid",)),
+            ("latest.xlsx", 2, ("four", "five")),
+        )
+        paths: list[tuple[Path, tuple[str, ...]]] = []
+        for name, offset, texts in sources:
+            path = self.workspace / name
+            path.write_bytes(name.encode("utf-8"))
+            os.utime(path, ns=(now_ns + offset, now_ns + offset))
+            paths.append((path, texts))
+
+        database = module.connect_database(directory)
+        try:
+            for path, texts in paths:
+                module.replace_document(
+                    database,
+                    path,
+                    module.fingerprint(path),
+                    "normal",
+                    "",
+                    "full-text",
+                    "complete",
+                    [
+                        module.chunk(index, f"cell=A{index + 1}", "Summary", text)
+                        for index, text in enumerate(texts)
+                    ],
+                )
+        finally:
+            module.close_database(database, directory)
+
+        with mock.patch.object(module, "MAX_KNOWLEDGE_DOCUMENTS", 2, create=True):
+            with mock.patch.object(module, "MAX_KNOWLEDGE_CHUNKS", 3, create=True):
+                with mock.patch.object(module, "MAX_KNOWLEDGE_TEXT_BYTES", 12, create=True):
+                    database = module.connect_database(directory)
+                    try:
+                        documents = database.execute(
+                            "SELECT path FROM documents ORDER BY mtime_ns DESC, path ASC"
+                        ).fetchall()
+                        chunk_count = database.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                        text_chars = database.execute(
+                            "SELECT COALESCE(SUM(LENGTH(text)), 0) FROM chunks"
+                        ).fetchone()[0]
+                    finally:
+                        module.close_database(database, directory)
+
+        self.assertEqual(
+            [Path(row[0]).name for row in documents],
+            ["latest.xlsx", "middle.xlsx"],
+        )
+        self.assertEqual(chunk_count, 3)
+        self.assertLessEqual(text_chars, 12)
+
+        with mock.patch.object(module, "MAX_KNOWLEDGE_DOCUMENTS", 2, create=True):
+            with mock.patch.object(module, "MAX_KNOWLEDGE_CHUNKS", 3, create=True):
+                with mock.patch.object(module, "MAX_KNOWLEDGE_TEXT_BYTES", 8, create=True):
+                    database = module.connect_database(directory)
+                    try:
+                        documents = database.execute(
+                            "SELECT path FROM documents ORDER BY mtime_ns DESC, path ASC"
+                        ).fetchall()
+                        chunk_count = database.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                        text_bytes = database.execute(
+                            "SELECT COALESCE(SUM(LENGTH(CAST(text AS BLOB))), 0) FROM chunks"
+                        ).fetchone()[0]
+                    finally:
+                        module.close_database(database, directory)
+
+        self.assertEqual([Path(row[0]).name for row in documents], ["latest.xlsx"])
+        self.assertEqual(chunk_count, 2)
+        self.assertEqual(text_bytes, 8)
+
     def test_index_isolates_malformed_supported_documents(self) -> None:
         malformed = {
             ".docx": self.workspace / "broken.docx",
@@ -364,7 +508,10 @@ class CoreCase(unittest.TestCase):
             os.fspath(self.workspace),
         )
 
-        self.assertEqual((result["discovered"], result["indexed"], result["errors"]), (5, 5, 4))
+        self.assertEqual(
+            (result["discovered"], result["indexed"], result["errors"], result["metadata_only"]),
+            (5, 5, 3, 1),
+        )
         database = sqlite3.connect(self.workspace_data() / "office.db")
         try:
             rows = database.execute(
@@ -373,11 +520,12 @@ class CoreCase(unittest.TestCase):
         finally:
             database.close()
         statuses = {Path(path).name: (status, error) for path, status, error in rows}
-        for path in (*malformed.values(), broken_pdf):
+        for path in malformed.values():
             status, error = statuses[path.name]
             self.assertEqual(status, "error")
             self.assertTrue(error)
             self.assertLessEqual(len(error), 500)
+        self.assertEqual(statuses[broken_pdf.name], ("complete", ""))
         self.assertEqual(statuses[valid.name][0], "complete")
 
     def test_index_rejects_paths_outside_the_configured_workspace_root(self) -> None:
@@ -902,6 +1050,90 @@ class CoreCase(unittest.TestCase):
         self.assertTrue(changed["needs_run"])
         self.assertTrue(target.exists())
 
+    def test_needs_run_does_not_create_an_output_directory(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+
+        result, _ = self.run_core(
+            "needs-run",
+            "--source",
+            os.fspath(source),
+            "--task",
+            "唯讀排程檢查",
+            "--extension",
+            ".xlsx",
+        )
+        self.assertTrue(result["needs_run"])
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+    def test_publish_requires_one_manual_proposal_confirmation(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state, _ = self.run_core(
+            "begin",
+            "--task",
+            "確認後發布",
+            "--intent",
+            "update",
+            "--object",
+            "office",
+            "--permission",
+            "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+            "--source",
+            os.fspath(source),
+        )
+        self.assertEqual(state["status"], "awaiting_confirmation")
+        candidate = self.candidate_for(state)
+        write_xlsx(candidate, "candidate")
+
+        denied, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "確認後發布",
+            expected=2,
+        )
+        self.assertIn("confirmation", denied["error"])
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
+        confirmed, _ = self.run_core("confirm")
+        self.assertTrue(confirmed["proposal_confirmed"])
+        published, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "確認後發布",
+        )
+        self.assertEqual(published["status"], "published")
+
+    def test_source_free_run_rejects_a_late_source_at_publish(self) -> None:
+        state = self.begin_publish_run("來源自由建立", ())
+        late_source = self.workspace / "late.xlsx"
+        write_xlsx(late_source, "late")
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(self.candidate_for(state)),
+            "--source",
+            os.fspath(late_source),
+            "--task",
+            "來源自由建立",
+            expected=2,
+        )
+        self.assertIn("sources", result["error"])
+        self.assertFalse((self.workspace / "Office OS Output").exists())
+
     def test_publish_rejects_target_outside_fixed_output_directory(self) -> None:
         source = self.workspace / "source.xlsx"
         outside = self.workspace / "outside.xlsx"
@@ -1179,7 +1411,7 @@ class CoreCase(unittest.TestCase):
             "--units",
             "1",
         )
-        self.assertEqual(second["status"], "executing")
+        self.assertEqual(second["status"], "awaiting_confirmation")
         self.assertTrue(candidate.exists())
         self.run_core("complete", "--summary", "second complete")
         self.workspace = first_workspace
@@ -1375,6 +1607,54 @@ class CoreCase(unittest.TestCase):
                     os.rmdir(output)
                 else:
                     output.unlink()
+
+    def test_cleanup_rejects_outside_and_linked_ancestor_roots(self) -> None:
+        outside = self.base / "outside-cleanup"
+        outside.mkdir()
+        temporary = outside / "Office OS Output" / ".office-os-temp.xlsx"
+        temporary.parent.mkdir()
+        temporary.write_text("outside", encoding="utf-8")
+
+        outside_result, _ = self.run_core(
+            "cleanup",
+            "--path",
+            os.fspath(outside),
+            "--older-than-seconds",
+            "0",
+            expected=2,
+        )
+        self.assertIn("workspace", outside_result["error"])
+        self.assertEqual(temporary.read_text(encoding="utf-8"), "outside")
+
+        linked = self.workspace / "linked-cleanup"
+        if os.name == "nt":
+            linked_result = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(linked), os.fspath(outside)],
+                text=True,
+                encoding="utf-8",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(linked_result.returncode, 0, linked_result.stderr)
+        else:
+            linked.symlink_to(outside, target_is_directory=True)
+        try:
+            linked_result, _ = self.run_core(
+                "cleanup",
+                "--path",
+                os.fspath(linked),
+                "--older-than-seconds",
+                "0",
+                expected=2,
+            )
+            self.assertIn("linked", linked_result["error"])
+            self.assertEqual(temporary.read_text(encoding="utf-8"), "outside")
+        finally:
+            if os.path.lexists(linked):
+                if os.name == "nt":
+                    os.rmdir(linked)
+                else:
+                    linked.unlink()
 
     def test_core_rejects_linked_workspace_state_ancestors(self) -> None:
         self.plugin_data.mkdir()
