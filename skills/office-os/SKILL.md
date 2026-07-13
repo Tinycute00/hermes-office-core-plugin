@@ -1,15 +1,15 @@
 ---
 name: office-os
-description: "無本機 Office 來源（即使明示 $office-os）：不可啟動此 skill、讀檔、工具或前言；只能一次最終回覆首行意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[快速/加強/完整]；第四欄只能是「檢查」，不可寫品質或驗證；後面最多一題來源問題。用於 Excel (.xlsx)、Word (.docx)、PowerPoint (.pptx)、PDF，以及查找、分析、檢查、建立、更新、整合、排程等辦公任務。"
+description: "Source-less Office intake: first visible assistant message MUST start 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]; fourth field must be 檢查, not 品質 or 驗證; then at most one short source question. Do not inspect or alter Office data until a local source path or folder is supplied. Use for Excel (.xlsx), Word (.docx), PowerPoint (.pptx), PDF, and office lookup, analysis, review, creation, updates, integration, or schedules."
 ---
 
 # Office OS
 
 Turn an ordinary office request into a bounded, inspectable workflow. Keep the user-facing interaction nontechnical and fast.
 
-## 0. Source-less hard stop
+## 0. Source-free intake
 
-If the current prompt does not name a local source path or folder, including when it explicitly names $office-os, do not invoke this workflow, read this file or a reference, make a tool call, or emit a preamble. The only permitted output is one final assistant message whose first line is the intent envelope and whose optional second line is one short source question. This hard stop overrides an explicit $office-os mention until the user provides a source.
+If the current prompt does not name a local source path or folder, the first visible assistant message must be the intent envelope followed by at most one short source question. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit `$office-os` invocation can load this skill, but do not load a workflow reference until the user provides a source.
 
 ## 1. Classify the current turn
 
@@ -26,7 +26,7 @@ Choose one value per dimension:
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
-For a prompt without a named local source path or folder, the source-less hard stop takes priority over all workflow activity. Use the envelope as the first line and ask at most one short source question. Only after that reply, and once the user names a source, invoke this workflow and read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
+For a prompt without a named local source path or folder, the source-free intake rule takes priority over Office data work. Use the envelope as the first line and ask at most one short source question. Only after that reply, and once the user names a source, read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 

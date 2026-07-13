@@ -121,36 +121,30 @@ class HookCase(unittest.TestCase):
         ):
             self.assertIn(marker, context)
 
-    def test_missing_source_intake_defers_skill_and_references_until_reply(self) -> None:
-        result = self.run_hook(self.prompt_payload("請更新 Excel 報表並整理本月差異。"))
+    def test_missing_source_intake_frontloads_exact_envelope_before_office_work(self) -> None:
+        result = self.run_hook(
+            self.prompt_payload("請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。")
+        )
         self.assertIsNotNone(result)
         context = result["hookSpecificOutput"]["additionalContext"]
-        missing_source_rule = (
-            "SOURCELESS HARD STOP: if the prompt does not name a local source path or folder, "
-            "even when it explicitly names $office-os, do not invoke $office-os"
-        )
-        deferred_work = (
-            "After that reply and once the user names a source, invoke $office-os and read"
-        )
         skill_path = ROOT / "skills" / "office-os" / "SKILL.md"
 
-        self.assertIn(missing_source_rule, context)
-        self.assertIn("first line must be the intent envelope", context)
-        self.assertIn("Chinese intent envelope", context)
-        self.assertIn("at most one short source question", context)
-        self.assertIn("The hard stop overrides an explicit $office-os mention", context)
-        self.assertIn("Do not make a tool call, read a file or reference", context)
-        self.assertIn(deferred_work, context)
-        self.assertLess(context.index(missing_source_rule), context.index(deferred_work))
-        deferred_reference_read = (
-            "Only after that reply and once the user names a source, read "
-            f"{skill_path} and the relevant references"
+        self.assertTrue(context.startswith("<office-os-source-free-intake>\n"), context)
+        self.assertIn(
+            "First user-visible assistant message this turn MUST be exactly:", context
         )
-        self.assertIn(deferred_reference_read, context)
-        self.assertLess(
-            context.index(deferred_work), context.index(deferred_reference_read)
+        self.assertIn(
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
+            "Excel 來源檔或資料夾路徑是什麼？",
+            context,
         )
-        self.assertNotIn(f"Read {skill_path} and the relevant references", context)
+        self.assertIn("Do not inspect or alter Office data", context)
+        self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
+        self.assertIn(
+            "Loading this skill to honor an explicit $office-os invocation is allowed", context
+        )
+        self.assertNotIn(os.fspath(skill_path), context)
+        self.assertNotIn("Office.md", context)
 
     def test_hook_rejects_claude_only_plugin_data(self) -> None:
         environment = os.environ.copy()

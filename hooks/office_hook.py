@@ -79,7 +79,7 @@ ACTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 SCHEDULE_PATTERN = re.compile(
-    r"\b(?:schedule|repeat|recurring|automate)\b|排程|定期|循環|自動",
+    r"\b(?:schedule|repeat|recurring|automate|weekly|daily|monthly)\b|排程|定期|循環|自動|每週|每天|每月",
     re.IGNORECASE,
 )
 
@@ -94,6 +94,9 @@ INLINE_CODE_PATTERN = re.compile(
 EXTENSION_PATTERN = re.compile(
     r"(?<![\w.])[^<>\r\n]*?\.(?:xlsx|xlsm|xls|docx|docm|doc|pptx|pptm|ppt|pdf)\b",
     re.IGNORECASE,
+)
+LOCAL_PATH_PATTERN = re.compile(
+    r"(?<!\w)(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|/[A-Za-z0-9_.-]+|\\\\[A-Za-z0-9_.-]+)"
 )
 ACTIVE_STATUSES = {"grounding", "agreed", "executing", "validating", "publishing"}
 MAX_DEDUP_KEYS = 128
@@ -341,6 +344,64 @@ def is_office_prompt(prompt: str) -> bool:
     return bool(ACTION_PATTERN.search(cleaned) and object_hints(cleaned))
 
 
+def has_named_local_source(prompt: str) -> bool:
+    cleaned = strip_code(prompt)
+    return bool(EXTENSION_PATTERN.search(cleaned) or LOCAL_PATH_PATTERN.search(cleaned))
+
+
+def source_free_intent(prompt: str) -> str:
+    cleaned = strip_code(prompt)
+    if SCHEDULE_PATTERN.search(cleaned):
+        return "排程"
+    if re.search(r"\b(?:update|edit|change|fix|format)\b|更新|編輯|修改|修正|格式", cleaned, re.I):
+        return "更新"
+    if re.search(r"\b(?:create|make|write)\b|建立|製作|撰寫", cleaned, re.I):
+        return "建立"
+    if re.search(r"\b(?:find|search)\b|找|搜尋|查找", cleaned, re.I):
+        return "查找"
+    if re.search(r"\b(?:analy[sz]e|compare)\b|分析|比較", cleaned, re.I):
+        return "分析"
+    return "檢查"
+
+
+def source_free_object(prompt: str) -> str:
+    hints = object_hints(strip_code(prompt))
+    if len(hints) == 1:
+        return hints[0]
+    return "跨檔案"
+
+
+def source_free_check(prompt: str) -> str:
+    cleaned = strip_code(prompt)
+    if re.search(r"\b(?:complete|full)\b|完整", cleaned, re.I):
+        return "完整"
+    if re.search(r"\b(?:enhanced|strong)\b|加強", cleaned, re.I):
+        return "加強"
+    return "快速"
+
+
+def source_free_intake_context(prompt: str) -> str:
+    object_name = source_free_object(prompt)
+    envelope = (
+        f"意圖：{source_free_intent(prompt)}｜物件：{object_name}｜權限：唯讀｜"
+        f"檢查：{source_free_check(prompt)}"
+    )
+    question = f"{object_name} 來源檔或資料夾路徑是什麼？"
+    return (
+        "<office-os-source-free-intake>\n"
+        "SOURCE-FREE OFFICE INTAKE IS ACTIVE.\n\n"
+        "MANDATORY ORDER:\n"
+        "1. First user-visible assistant message this turn MUST be exactly:\n"
+        f"`{envelope}\n{question}`\n"
+        "No greeting, preamble, plan, acknowledgement, skill announcement, status, or other text may occur before it.\n\n"
+        "2. Do not inspect or alter Office data. Do not call `office_os.py`, OfficeCLI, or an MCP tool; "
+        "do not create workspace state, a candidate, an output, or a schedule. Wait for the user to name a local source path or folder.\n\n"
+        "3. Loading this skill to honor an explicit $office-os invocation is allowed, but do not load workflow references "
+        "or inspect Office data until the source is named.\n"
+        "</office-os-source-free-intake>"
+    )
+
+
 def prompt_reference(prompt: str) -> tuple[str, ...]:
     cleaned = strip_code(prompt)
     hints = object_hints(cleaned)
@@ -419,6 +480,9 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         return
     if not remember_prompt(directory, payload, prompt):
         return
+    if not has_named_local_source(prompt):
+        emit(context_output("UserPromptSubmit", source_free_intake_context(prompt)))
+        return
     plugin_root = Path(
         os.environ.get("PLUGIN_ROOT")
         or os.environ.get("CLAUDE_PLUGIN_ROOT")
@@ -430,10 +494,7 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         for name in prompt_reference(prompt)
     ]
     context = (
-        "SOURCELESS HARD STOP: if the prompt does not name a local source path or folder, even when it explicitly names $office-os, "
-        "do not invoke $office-os, read a file or reference, make a tool call, or emit a visible preamble, plan, skill announcement, "
-        "tool-activity summary, progress message, or separate message. "
-        "The hard stop overrides an explicit $office-os mention until the user names a source. "
+        "<office-os-intake>\n"
         "Reply with exactly one final assistant message: "
         "its first line must be the intent envelope, specifically the Chinese intent envelope in this exact shape: "
         "意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>. "
@@ -443,13 +504,13 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
         "tool-activity summary, progress message, or separate message before that reply. "
         "Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; "
         "none may substitute for this final reply. "
-        "After that reply and once the user names a source, invoke $office-os and read the workflow instructions. "
-        "For a prompt that already names a local source path or folder, proceed under normal Office routing after classification. "
+        "The prompt names a local source path or folder, so proceed under normal Office routing after classification. "
         "Classify this turn only; prior edit or schedule permission does not carry over. "
-        "Only after that reply and once the user names a source, read "
+        "Invoke $office-os for the workflow. Read "
         f"{skill_path} and the relevant references "
         f"{', '.join(os.fspath(reference) for reference in references)}; "
-        "for a prompt already naming a local source path or folder, read them under normal Office routing."
+        "then continue under normal Office routing.\n"
+        "</office-os-intake>"
         + plugin_data_context(directory)
     )
     emit(context_output("UserPromptSubmit", context))

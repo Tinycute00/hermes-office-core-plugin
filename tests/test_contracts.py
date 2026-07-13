@@ -71,7 +71,7 @@ class ContractCase(unittest.TestCase):
         for reference in sorted(references):
             self.assertIn(f"[{reference}](references/{reference})", text)
 
-    def test_skill_description_starts_with_missing_source_final_intake_contract(self) -> None:
+    def test_skill_description_starts_with_source_free_intake_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
             encoding="utf-8"
         )
@@ -84,18 +84,21 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "無本機 Office 來源（即使明示 $office-os）：不可啟動此 skill、讀檔、工具或前言；只能一次最終回覆首行"
+                "Source-less Office intake: first visible assistant message MUST start "
+                "意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]"
             ),
             description,
         )
         self.assertIn(
-            "意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[快速/加強/完整]",
+            "意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]",
             description,
         )
-        self.assertIn("第四欄只能是「檢查」", description)
-        self.assertIn("不可寫品質或驗證", description)
-        self.assertIn("最多一題來源問題", description)
-        self.assertIn("不可啟動此 skill、讀檔、工具或前言", description)
+        self.assertIn("fourth field must be 檢查, not 品質 or 驗證", description)
+        self.assertIn("at most one short source question", description)
+        self.assertIn(
+            "Do not inspect or alter Office data until a local source path or folder is supplied",
+            description,
+        )
 
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
         source = (ROOT / "skills" / "office-os" / "SKILL.md").read_bytes()
