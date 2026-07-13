@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import shutil
 import sqlite3
@@ -39,6 +39,11 @@ from office_candidate_runs import active_run_candidate_paths
 from office_candidate_runs import remove_candidate_directory
 from office_candidate_runs import reserve_candidate_directory
 from office_candidate_runs import validated_run_candidate
+from office_document_index import DocumentIndexError
+from office_document_index import chunk as _chunk
+from office_document_index import extract_docx as _extract_docx
+from office_document_index import extract_pptx as _extract_pptx
+from office_document_index import extract_xlsx as _extract_xlsx
 from office_openxml_index import IndexPackageLimitError, IndexPackageLimits
 from office_openxml_index import open_index_package
 from office_openxml import OpenXMLValidationError, validate_openxml
@@ -514,23 +519,13 @@ def query_max_chars(value: str) -> int:
     return bounded_integer(value, 1, MAX_QUERY_TEXT_CHARS, "query max-chars")
 
 
-def local_name(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def element_text(element: ET.Element) -> str:
-    values = [
-        node.text or ""
-        for node in element.iter()
-        if local_name(node.tag) in {"t", "instrText", "delText"}
-    ]
-    return "".join(values).strip()
-
-
-def natural_part_key(name: str) -> tuple[Any, ...]:
-    return tuple(
-        int(piece) if piece.isdigit() else piece.lower()
-        for piece in re.split(r"(\d+)", name)
+def _index_package_limits() -> IndexPackageLimits:
+    return IndexPackageLimits(
+        max_archive_bytes=MAX_INDEX_PACKAGE_ARCHIVE_BYTES,
+        max_members=MAX_INDEX_PACKAGE_MEMBERS,
+        max_member_bytes=MAX_INDEX_PACKAGE_MEMBER_BYTES,
+        max_uncompressed_bytes=MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES,
+        max_compression_ratio=MAX_INDEX_PACKAGE_COMPRESSION_RATIO,
     )
 
 
@@ -538,15 +533,8 @@ def natural_part_key(name: str) -> tuple[Any, ...]:
 def bounded_index_package(path: Path) -> Iterator[zipfile.ZipFile]:
     """Expose an Open XML package after fixed index resource checks."""
 
-    limits = IndexPackageLimits(
-        max_archive_bytes=MAX_INDEX_PACKAGE_ARCHIVE_BYTES,
-        max_members=MAX_INDEX_PACKAGE_MEMBERS,
-        max_member_bytes=MAX_INDEX_PACKAGE_MEMBER_BYTES,
-        max_uncompressed_bytes=MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES,
-        max_compression_ratio=MAX_INDEX_PACKAGE_COMPRESSION_RATIO,
-    )
     try:
-        with open_index_package(path, limits) as package:
+        with open_index_package(path, _index_package_limits()) as package:
             yield package
     except IndexPackageLimitError as error:
         raise OfficeOSError(str(error)) from error
@@ -596,323 +584,28 @@ def chunk(
     heading: str,
     text: str,
 ) -> dict[str, Any]:
-    normalized = re.sub(r"[ \t]+\n", "\n", text).strip()
-    return {
-        "ordinal": ordinal,
-        "locator": locator,
-        "heading": heading.strip(),
-        "text": normalized,
-        "content_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
-    }
-
-
-def split_text_chunks(
-    text: str,
-    locator_prefix: str,
-    heading: str,
-    start_ordinal: int,
-    max_chars: int = 12000,
-) -> list[dict[str, Any]]:
-    paragraphs = [item.strip() for item in re.split(r"\n{2,}", text) if item.strip()]
-    results: list[dict[str, Any]] = []
-    current: list[str] = []
-    current_length = 0
-    ordinal = start_ordinal
-    part = 1
-    for paragraph in paragraphs or [text.strip()]:
-        if current and current_length + len(paragraph) > max_chars:
-            results.append(
-                chunk(
-                    ordinal,
-                    f"{locator_prefix};part={part}",
-                    heading,
-                    "\n\n".join(current),
-                )
-            )
-            ordinal += 1
-            part += 1
-            current = []
-            current_length = 0
-        if paragraph:
-            current.append(paragraph)
-            current_length += len(paragraph)
-    if current:
-        results.append(
-            chunk(
-                ordinal,
-                f"{locator_prefix};part={part}",
-                heading,
-                "\n\n".join(current),
-            )
-        )
-    return results
+    return _chunk(ordinal, locator, heading, text)
 
 
 def extract_docx(path: Path) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    with bounded_index_package(path) as package:
-        root = ET.fromstring(package.read("word/document.xml"))
-        body = next((item for item in root.iter() if local_name(item.tag) == "body"), root)
-        sections: list[tuple[str, list[str]]] = []
-        current_heading = "Document"
-        current_items: list[str] = []
-        for child in list(body):
-            name = local_name(child.tag)
-            if name == "p":
-                text = element_text(child)
-                if not text:
-                    continue
-                style = ""
-                for node in child.iter():
-                    if local_name(node.tag) == "pStyle":
-                        style = next(
-                            (
-                                value
-                                for key, value in node.attrib.items()
-                                if local_name(key) == "val"
-                            ),
-                            "",
-                        )
-                        break
-                if re.search(r"heading|title|標題", style, re.IGNORECASE):
-                    if current_items:
-                        sections.append((current_heading, current_items))
-                    current_heading = text
-                    current_items = [text]
-                else:
-                    current_items.append(text)
-            elif name == "tbl":
-                rows: list[str] = []
-                for row in child.iter():
-                    if local_name(row.tag) != "tr":
-                        continue
-                    cells = [
-                        element_text(cell)
-                        for cell in list(row)
-                        if local_name(cell.tag) == "tc"
-                    ]
-                    if cells:
-                        rows.append("\t".join(cells))
-                if rows:
-                    current_items.append("\n".join(rows))
-        if current_items:
-            sections.append((current_heading, current_items))
-        ordinal = 0
-        for heading, items in sections:
-            section_chunks = split_text_chunks(
-                "\n\n".join(items),
-                f"heading={heading}",
-                heading,
-                ordinal,
-            )
-            results.extend(section_chunks)
-            ordinal += len(section_chunks)
-        extra_parts = sorted(
-            [
-                name
-                for name in package.namelist()
-                if re.match(
-                    r"word/(?:header|footer|footnotes|endnotes|comments)\d*\.xml$",
-                    name,
-                    re.IGNORECASE,
-                )
-            ],
-            key=natural_part_key,
-        )
-        for part in extra_parts:
-            text = element_text(ET.fromstring(package.read(part)))
-            if text:
-                results.append(
-                    chunk(ordinal, f"part={part}", PurePosixPath(part).stem, text)
-                )
-                ordinal += 1
-    return results
+    try:
+        return _extract_docx(path, _index_package_limits())
+    except DocumentIndexError as error:
+        raise OfficeOSError(str(error)) from error
 
 
 def extract_pptx(path: Path) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    with bounded_index_package(path) as package:
-        names = set(package.namelist())
-        slide_parts = sorted(
-            [
-                name
-                for name in names
-                if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
-            ],
-            key=natural_part_key,
-        )
-        for ordinal, part in enumerate(slide_parts):
-            number_match = re.search(r"(\d+)", PurePosixPath(part).stem)
-            slide_number = int(number_match.group(1)) if number_match else ordinal + 1
-            slide_root = ET.fromstring(package.read(part))
-            slide_texts = [
-                (node.text or "").strip()
-                for node in slide_root.iter()
-                if local_name(node.tag) == "t" and (node.text or "").strip()
-            ]
-            notes_part = f"ppt/notesSlides/notesSlide{slide_number}.xml"
-            notes_texts: list[str] = []
-            if notes_part in names:
-                notes_root = ET.fromstring(package.read(notes_part))
-                notes_texts = [
-                    (node.text or "").strip()
-                    for node in notes_root.iter()
-                    if local_name(node.tag) == "t" and (node.text or "").strip()
-                ]
-            heading = slide_texts[0] if slide_texts else f"Slide {slide_number}"
-            combined = "\n".join(slide_texts)
-            if notes_texts:
-                combined += "\n\nNotes:\n" + "\n".join(notes_texts)
-            if combined.strip():
-                results.append(
-                    chunk(
-                        ordinal,
-                        f"slide={slide_number};shape-tree=all",
-                        heading,
-                        combined,
-                    )
-                )
-    return results
-
-
-def read_shared_strings(package: zipfile.ZipFile) -> list[str]:
-    if "xl/sharedStrings.xml" not in package.namelist():
-        return []
-    root = ET.fromstring(package.read("xl/sharedStrings.xml"))
-    return [
-        "".join(
-            node.text or ""
-            for node in item.iter()
-            if local_name(node.tag) == "t"
-        )
-        for item in root
-        if local_name(item.tag) == "si"
-    ]
-
-
-def relationship_map(package: zipfile.ZipFile, part: str) -> dict[str, str]:
-    pure = PurePosixPath(part)
-    relationship_part = str(pure.parent / "_rels" / f"{pure.name}.rels")
-    if relationship_part not in package.namelist():
-        return {}
-    root = ET.fromstring(package.read(relationship_part))
-    relationships: dict[str, str] = {}
-    for node in root:
-        if local_name(node.tag) != "Relationship":
-            continue
-        relation_id = node.attrib.get("Id", "")
-        target = node.attrib.get("Target", "")
-        if target.startswith("/"):
-            normalized = target.lstrip("/")
-        else:
-            normalized = str(PurePosixPath(pure.parent, target))
-        relationships[relation_id] = str(PurePosixPath(normalized))
-    return relationships
+    try:
+        return _extract_pptx(path, _index_package_limits())
+    except DocumentIndexError as error:
+        raise OfficeOSError(str(error)) from error
 
 
 def extract_xlsx(path: Path) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    with bounded_index_package(path) as package:
-        shared = read_shared_strings(package)
-        workbook_part = "xl/workbook.xml"
-        root = ET.fromstring(package.read(workbook_part))
-        relationships = relationship_map(package, workbook_part)
-        sheets: list[tuple[str, str]] = []
-        for node in root.iter():
-            if local_name(node.tag) != "sheet":
-                continue
-            name = node.attrib.get("name", "Sheet")
-            relation_id = next(
-                (
-                    value
-                    for key, value in node.attrib.items()
-                    if local_name(key) == "id"
-                ),
-                "",
-            )
-            target = relationships.get(relation_id, "")
-            if target:
-                sheets.append((name, target))
-        ordinal = 0
-        for sheet_name, part in sheets:
-            if part not in package.namelist():
-                continue
-            sheet_root = ET.fromstring(package.read(part))
-            entries: list[tuple[str, str]] = []
-            for cell in sheet_root.iter():
-                if local_name(cell.tag) != "c":
-                    continue
-                reference = cell.attrib.get("r", "")
-                cell_type = cell.attrib.get("t", "")
-                formula = ""
-                raw_value = ""
-                inline_value = ""
-                for child in cell:
-                    child_name = local_name(child.tag)
-                    if child_name == "f":
-                        formula = child.text or ""
-                    elif child_name == "v":
-                        raw_value = child.text or ""
-                    elif child_name == "is":
-                        inline_value = element_text(child)
-                value = inline_value or raw_value
-                if cell_type == "s" and raw_value:
-                    try:
-                        value = shared[int(raw_value)]
-                    except (ValueError, IndexError):
-                        value = raw_value
-                elif cell_type == "b" and raw_value:
-                    value = "TRUE" if raw_value == "1" else "FALSE"
-                if formula:
-                    rendered = f"{reference}\t={formula}"
-                    if value:
-                        rendered += f"\t→ {value}"
-                else:
-                    rendered = f"{reference}\t{value}"
-                if value or formula:
-                    entries.append((reference, rendered))
-            for offset in range(0, len(entries), 300):
-                group = entries[offset : offset + 300]
-                first = group[0][0] if group else ""
-                last = group[-1][0] if group else ""
-                text = "\n".join(item[1] for item in group)
-                if text:
-                    results.append(
-                        chunk(
-                            ordinal,
-                            f"sheet={sheet_name};range={first}:{last};kind=cells",
-                            sheet_name,
-                            text,
-                        )
-                    )
-                    ordinal += 1
-        table_parts = sorted(
-            [
-                name
-                for name in package.namelist()
-                if re.fullmatch(r"xl/tables/table\d+\.xml", name)
-            ],
-            key=natural_part_key,
-        )
-        for part in table_parts:
-            table_root = ET.fromstring(package.read(part))
-            table_name = table_root.attrib.get("displayName", PurePosixPath(part).stem)
-            table_range = table_root.attrib.get("ref", "")
-            columns = [
-                node.attrib.get("name", "")
-                for node in table_root.iter()
-                if local_name(node.tag) == "tableColumn"
-            ]
-            results.append(
-                chunk(
-                    ordinal,
-                    f"table={table_name};range={table_range}",
-                    table_name,
-                    "\t".join(columns),
-                )
-            )
-            ordinal += 1
-    return results
+    try:
+        return _extract_xlsx(path, _index_package_limits())
+    except DocumentIndexError as error:
+        raise OfficeOSError(str(error)) from error
 
 
 def extract_chunks(path: Path) -> list[dict[str, Any]]:
