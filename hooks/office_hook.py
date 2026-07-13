@@ -467,12 +467,14 @@ def canonical_source_free_reply(message: str) -> bool:
     return bool(match and match.group(2) == match.group(4))
 
 
-def pending_intake_key(payload: dict[str, Any]) -> str:
+def pending_intake_keys(payload: dict[str, Any]) -> tuple[str, str]:
     session_id = str(payload.get("session_id") or "")
     turn_id = str(payload.get("turn_id") or "")
     if not session_id or not turn_id:
         raise HookStateError("Office OS source-free intake requires session_id and turn_id.")
-    return hashlib.sha256(f"{session_id}\0{turn_id}".encode("utf-8")).hexdigest()
+    session_key = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    turn_key = hashlib.sha256(f"{session_id}\0{turn_id}".encode("utf-8")).hexdigest()
+    return session_key, turn_key
 
 
 def live_pending_intakes(value: Any, now: int) -> list[dict[str, Any]]:
@@ -483,11 +485,14 @@ def live_pending_intakes(value: Any, now: int) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         key = entry.get("key")
+        session_key = entry.get("session_key")
         expected = entry.get("expected")
         created_at = entry.get("created_at")
         if (
             isinstance(key, str)
             and re.fullmatch(r"[0-9a-f]{64}", key)
+            and isinstance(session_key, str)
+            and re.fullmatch(r"[0-9a-f]{64}", session_key)
             and isinstance(expected, str)
             and canonical_source_free_reply(expected)
             and isinstance(created_at, int)
@@ -495,7 +500,12 @@ def live_pending_intakes(value: Any, now: int) -> list[dict[str, Any]]:
             and cutoff <= created_at <= now
         ):
             live.append(
-                {"key": key, "expected": normalized_message(expected), "created_at": created_at}
+                {
+                    "key": key,
+                    "session_key": session_key,
+                    "expected": normalized_message(expected),
+                    "created_at": created_at,
+                }
             )
     return live[-MAX_PENDING_INTAKES:]
 
@@ -505,15 +515,22 @@ def remember_pending_intake(payload: dict[str, Any], expected: str) -> None:
         plugin_data_root(), "plugin data root", create_parents=True
     )
     cleanup_stale_temps(data_root)
-    key = pending_intake_key(payload)
+    session_key, key = pending_intake_keys(payload)
     now = int(time.time())
     path = data_root / PENDING_INTAKES_NAME
     with state_lock(data_root) as acquired:
         if not acquired:
             raise HookStateError("Office OS could not lock pending intake state.")
         entries = live_pending_intakes(read_json(path, {"entries": []}), now)
-        entries = [entry for entry in entries if entry["key"] != key]
-        entries.append({"key": key, "expected": expected, "created_at": now})
+        entries = [entry for entry in entries if entry["session_key"] != session_key]
+        entries.append(
+            {
+                "key": key,
+                "session_key": session_key,
+                "expected": expected,
+                "created_at": now,
+            }
+        )
         write_json(path, {"entries": entries[-MAX_PENDING_INTAKES:]})
 
 
@@ -523,16 +540,25 @@ def consume_pending_intake(payload: dict[str, Any]) -> str | None:
     path = data_root / PENDING_INTAKES_NAME
     if not os.path.lexists(data_root) or not os.path.lexists(path):
         return None
-    key = pending_intake_key(payload)
+    session_key, key = pending_intake_keys(payload)
     now = int(time.time())
     with state_lock(data_root) as acquired:
         if not acquired:
             raise HookStateError("Office OS could not lock pending intake state.")
         entries = live_pending_intakes(read_json(path, {"entries": []}), now)
-        expected = next(
-            (entry["expected"] for entry in entries if entry["key"] == key), None
-        )
-        remaining = [entry for entry in entries if entry["key"] != key]
+        matched = next((entry for entry in entries if entry["key"] == key), None)
+        if matched is None:
+            matched = next(
+                (
+                    entry
+                    for entry in reversed(entries)
+                    if entry["session_key"] == session_key
+                ),
+                None,
+            )
+        expected = matched["expected"] if matched is not None else None
+        matched_key = matched["key"] if matched is not None else None
+        remaining = [entry for entry in entries if entry["key"] != matched_key]
         if remaining:
             write_json(path, {"entries": remaining})
         else:

@@ -18,8 +18,17 @@ HOOK = ROOT / "hooks" / "office_hook.py"
 
 class PendingIntakeEntry(TypedDict):
     key: str
+    session_key: str
     expected: str
     created_at: int
+
+
+class PromptPayload(TypedDict):
+    hook_event_name: str
+    session_id: str
+    turn_id: str
+    cwd: str
+    prompt: str
 
 
 class HookCase(unittest.TestCase):
@@ -99,10 +108,15 @@ class HookCase(unittest.TestCase):
         )
         return data["entries"]
 
-    def prompt_payload(self, prompt: str, turn: str = "turn-1") -> dict:  # noqa: DICT_OK
+    def prompt_payload(
+        self,
+        prompt: str,
+        turn: str = "turn-1",
+        session: str = "session-1",
+    ) -> PromptPayload:
         return {
             "hook_event_name": "UserPromptSubmit",
-            "session_id": "session-1",
+            "session_id": session,
             "turn_id": turn,
             "cwd": os.fspath(self.workspace),
             "prompt": prompt,
@@ -209,10 +223,12 @@ class HookCase(unittest.TestCase):
         entries = self.pending_intake_entries()
         self.assertEqual(len(entries), 1)
         self.assertEqual(
-            set(entries[0]), {"created_at", "expected", "key"}
+            set(entries[0]), {"created_at", "expected", "key", "session_key"}
         )
         self.assertRegex(str(entries[0]["key"]), r"\A[0-9a-f]{64}\Z")
+        self.assertRegex(str(entries[0]["session_key"]), r"\A[0-9a-f]{64}\Z")
         self.assertNotIn(prompt, json.dumps(entries, ensure_ascii=False))
+        self.assertNotIn("session-1", json.dumps(entries, ensure_ascii=False))
         self.assertFalse((self.plugin_data / "workspaces").exists())
 
     def test_nonexistent_bare_filename_remains_source_free_with_bounded_intake(self) -> None:
@@ -406,6 +422,88 @@ class HookCase(unittest.TestCase):
         self.assertEqual(self.run_hook(payload), {})
         self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
 
+    def test_source_free_stop_correction_prompt_does_not_open_a_new_intake(self) -> None:
+        payload = self.prompt_payload(
+            "The source-free Office intake final reply was not canonical. "
+            "Return exactly these two lines and nothing else:\n"
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
+            "Excel 來源檔或資料夾路徑是什麼？",
+            "turn-correction",
+            "session-correction",
+        )
+
+        self.assertIsNone(self.run_hook(payload))
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_source_free_stop_uses_same_session_marker_when_turn_changes(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+            )
+        )
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-stop-fallback",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": (
+                "意圖：更新｜物件：Excel｜權限：唯讀｜QA：快速\n"
+                "來源 Excel 檔案或資料夾路徑是什麼？"
+            ),
+        }
+
+        correction = self.run_hook(payload)
+
+        self.assertEqual(correction["decision"], "block")
+        self.assertIn(
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速",
+            correction["reason"],
+        )
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+
+    def test_source_free_stop_does_not_consume_another_session_marker(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+                "session-owner",
+            )
+        )
+        payload = {
+            "hook_event_name": "Stop",
+            "session_id": "session-other",
+            "turn_id": "turn-stop-fallback",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": "非標準回覆",
+        }
+
+        self.assertEqual(self.run_hook(payload), {})
+        entries = self.pending_intake_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertIn("物件：Excel", entries[0]["expected"])
+
+    def test_source_free_new_turn_replaces_older_marker_for_same_session(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free-old",
+            )
+        )
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我檢查 Word 文件；先不要改檔案。",
+                "turn-source-free-new",
+            )
+        )
+
+        entries = self.pending_intake_entries()
+
+        self.assertEqual(len(entries), 1)
+        self.assertIn("物件：Word", entries[0]["expected"])
+
     def test_source_free_stop_accepts_exact_pending_final_and_consumes_state(self) -> None:
         self.run_hook(
             self.prompt_payload(
@@ -451,6 +549,7 @@ class HookCase(unittest.TestCase):
                 self.prompt_payload(
                     f"每週更新 Excel 報表 {number}；先不要改檔案。",
                     f"turn-source-free-{number}",
+                    f"session-source-free-{number}",
                 )
             )
         entries = self.pending_intake_entries()
@@ -463,7 +562,9 @@ class HookCase(unittest.TestCase):
         )
         self.run_hook(
             self.prompt_payload(
-                "每週更新 Excel 最新報表；先不要改檔案。", "turn-source-free-latest"
+                "每週更新 Excel 最新報表；先不要改檔案。",
+                "turn-source-free-latest",
+                "session-source-free-latest",
             )
         )
         refreshed = self.pending_intake_entries()

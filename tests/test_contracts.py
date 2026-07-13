@@ -179,6 +179,14 @@ class ContractCase(unittest.TestCase):
             self.assertIn("caps live markers at 128", text)
             self.assertIn("expires them after one hour", text)
             self.assertIn("consumes the matching marker at Stop", text)
+            self.assertIn(
+                "a newer source-free turn in the same session replaces the older marker",
+                text,
+            )
+            self.assertIn(
+                "Stop can consume the same-session marker when the host advances the turn id",
+                text,
+            )
             self.assertNotIn("Prefer the canonical envelope", text)
             self.assertNotIn("must equal the supplied skill-use announcement verbatim", text.lower())
 
@@ -190,6 +198,8 @@ class ContractCase(unittest.TestCase):
         self.assertIn("never stores the raw prompt", text)
         self.assertIn("caps live markers at 128", text)
         self.assertIn("expires them after one hour", text)
+        self.assertIn("newer source-free turn in the same session replaces", text)
+        self.assertIn("same-session marker when the host advances the turn id", text)
 
     def test_workflow_has_no_unbounded_or_automatic_policy(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
@@ -276,6 +286,8 @@ class ContractCase(unittest.TestCase):
             "Retain at most 128 live intake markers",
             "expire them after one hour",
             "stores no raw prompt",
+            "newer source-free turn in the same session replaces",
+            "same-session marker when the host advances the turn id",
         ):
             self.assertIn(marker, text)
         for stale in (
