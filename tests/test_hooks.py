@@ -144,6 +144,8 @@ class HookCase(unittest.TestCase):
         self.assertIn(
             "Loading this skill to honor an explicit $office-os invocation is allowed", context
         )
+        self.assertIn("Authoritative Office OS PLUGIN_DATA is", context)
+        self.assertIn(os.fspath(self.plugin_data), context)
         self.assertNotIn(os.fspath(skill_path), context)
         self.assertNotIn("Office.md", context)
 

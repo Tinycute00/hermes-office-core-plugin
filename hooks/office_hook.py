@@ -479,7 +479,11 @@ def handle_user_prompt(payload: dict[str, Any], directory: Path) -> None:
     if not remember_prompt(directory, payload, prompt):
         return
     if not has_named_local_source(prompt):
-        emit(context_output("UserPromptSubmit", source_free_intake_context(prompt)))
+        emit(
+            context_output(
+                "UserPromptSubmit", source_free_intake_context(prompt) + plugin_data_context(directory)
+            )
+        )
         return
     plugin_root = Path(
         os.environ.get("PLUGIN_ROOT")
