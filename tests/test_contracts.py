@@ -88,7 +88,7 @@ class ContractCase(unittest.TestCase):
             ),
             description,
         )
-        self.assertIn("意圖：<值>｜物件：<值>｜權限：<值>｜檢查：<值>", description)
+        self.assertIn("意圖：[值]｜物件：[值]｜權限：[值]｜檢查：[值]", description)
         self.assertIn("最多一題來源問題", description)
         self.assertIn("不可使用工具、讀檔或 reference", description)
 
