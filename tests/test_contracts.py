@@ -88,12 +88,11 @@ class ContractCase(unittest.TestCase):
             ),
             description,
         )
-        self.assertIn("structured intent/object/read-only summary", description)
+        self.assertIn("one source-path question under a read-only boundary", description)
         self.assertIn(
-            "Prefer 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整]",
+            "Prefer a structured intent/object/read-only summary",
             description,
         )
-        self.assertIn("one source-path question", description)
         self.assertIn("No Office data work before source", description)
 
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
@@ -148,7 +147,7 @@ class ContractCase(unittest.TestCase):
             ):
                 self.assertIn(marker, text)
             self.assertIn("with a named local source path or folder", text)
-            self.assertIn("structured intent/object/read-only summary", text)
+            self.assertIn("at most one short source question under the read-only boundary", text)
 
     def test_readme_describes_source_free_intake_as_classification_first(self) -> None:
         text = (ROOT / "README.md").read_text(encoding="utf-8")

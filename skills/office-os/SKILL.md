@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "Source-free Office intake: classify the request before workflow work; then give a structured intent/object/read-only summary and one source-path question. Prefer 意圖：[值]｜物件：[值]｜權限：唯讀｜檢查：[快速/加強/完整] when host output allows. No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
+description: "Source-free Office intake: classify the request before workflow work; then ask one source-path question under a read-only boundary. Prefer a structured intent/object/read-only summary when host output allows. No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
 ---
 
 # Office OS
@@ -9,7 +9,7 @@ Turn an ordinary office request into a bounded, inspectable workflow. Keep the u
 
 ## 0. Source-free intake
 
-If the current prompt does not name a local source path or folder, start with a compact intent classification and then give a structured intent/object/read-only summary followed by at most one short source question. Prefer the canonical envelope when host output allows. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit `$office-os` invocation can load this skill, but do not load a workflow reference until the user provides a source.
+If the current prompt does not name a local source path or folder, start with a compact intent classification and then ask at most one short source question under the read-only boundary. Prefer the canonical envelope or another structured intent/object/read-only summary when host output allows. Do not inspect or alter Office data, call `office_os.py`, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit `$office-os` invocation can load this skill, but do not load a workflow reference until the user provides a source.
 
 ## 1. Classify the current turn
 
@@ -26,7 +26,7 @@ Choose one value per dimension:
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
-For a prompt without a named local source path or folder, the source-free intake rule takes priority over Office data work. Give the compact classification, then the structured intent/object/read-only summary and at most one short source question. Only after that reply, and once the user names a source, read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
+For a prompt without a named local source path or folder, the source-free intake rule takes priority over Office data work. Give the compact classification, then at most one short source question under the read-only boundary. Prefer a structured intent/object/read-only summary when host output allows. Only after that reply, and once the user names a source, read the references below. If the prompt already names a local source path or folder, continue with normal classification and reference routing.
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 

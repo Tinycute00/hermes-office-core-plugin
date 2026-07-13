@@ -135,7 +135,7 @@ class HookCase(unittest.TestCase):
             context,
         )
         self.assertIn(
-            "After loading this skill, provide a structured intent/object/read-only summary and one source request.",
+            "After loading this skill, ask one source request while retaining the read-only boundary.",
             context,
         )
         self.assertIn("Prefer this canonical envelope when host output allows:", context)

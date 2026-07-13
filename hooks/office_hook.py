@@ -411,7 +411,7 @@ def source_free_intake_context(prompt: str) -> str:
         "Do not inspect or alter Office data. Do not call `office_os.py`, OfficeCLI, or an MCP tool; "
         "do not create workspace state, a candidate, an output, or a schedule. Wait for the user to name a local source path or folder.\n\n"
         "Loading this skill to honor an explicit $office-os invocation is allowed, but do not load workflow references "
-        "or inspect Office data until the source is named. After loading this skill, provide a structured intent/object/read-only summary and one source request. "
+        "or inspect Office data until the source is named. After loading this skill, ask one source request while retaining the read-only boundary. "
         "Prefer this canonical envelope when host output allows:\n"
         f"`{envelope}\n{question}`\n"
         "</office-os-source-free-intake>"
