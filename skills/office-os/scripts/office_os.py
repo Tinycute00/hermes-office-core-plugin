@@ -82,8 +82,6 @@ MAX_KNOWLEDGE_TEXT_BYTES = 16 * 1024 * 1024
 MAX_INDEX_PACKAGE_ARCHIVE_BYTES = 64 * 1024 * 1024
 MAX_INDEX_PACKAGE_MEMBERS = 10_000
 MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
-MAX_PACKAGE_MEMBERS = 10_000
-MAX_PACKAGE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_INDEX_PACKAGE_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_INDEX_PACKAGE_COMPRESSION_RATIO = 100
 MAX_QUERY_RESULTS = 100
@@ -192,7 +190,7 @@ def canonical_workspace(cwd: str | Path | None = None) -> str:
 
 
 def plugin_data_root() -> Path:
-    configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
+    configured = os.environ.get("PLUGIN_DATA")
     if not configured:
         raise OfficeOSError("Office OS requires the hook-injected PLUGIN_DATA value.")
     return Path(os.path.abspath(configured))
@@ -755,9 +753,9 @@ def bounded_document_chunks(chunks: Sequence[dict[str, Any]]) -> list[dict[str, 
     for item in chunks:
         item_text_bytes = len(item["text"].encode("utf-8"))
         if len(retained) >= MAX_KNOWLEDGE_CHUNKS:
-            break
+            raise OfficeOSError("Document content exceeds the knowledge-map chunk limit.")
         if text_bytes + item_text_bytes > MAX_KNOWLEDGE_TEXT_BYTES:
-            break
+            raise OfficeOSError("Document content exceeds the knowledge-map text limit.")
         retained.append(item)
         text_bytes += item_text_bytes
     return retained
@@ -1126,7 +1124,7 @@ def command_index(args: argparse.Namespace) -> int:
                 LEGACY_EXTENSIONS | MACRO_EXTENSIONS
             ):
                 try:
-                    extracted = extract_chunks(path)
+                    extracted = bounded_document_chunks(extract_chunks(path))
                 except (OfficeOSError, OSError, zipfile.BadZipFile, ET.ParseError) as exc:
                     status = "error"
                     error = str(exc)
@@ -1468,7 +1466,7 @@ def command_confirm(args: argparse.Namespace) -> int:
             raise OfficeOSError("No active Office OS run to confirm.")
         if state.get("permission") != "fixed-output-write":
             raise OfficeOSError("Only a manual fixed-output run needs proposal confirmation.")
-        if state.get("status") != "awaiting_confirmation":
+        if state.get("status") not in {"awaiting_confirmation", "awaiting_user"}:
             raise OfficeOSError("The active Office OS run is not awaiting confirmation.")
         state["proposal_confirmed"] = True
         state["status"] = "executing"
@@ -1563,12 +1561,7 @@ def validate_candidate(path: Path) -> dict[str, Any]:
         ".pptx": {"[Content_Types].xml", "ppt/presentation.xml"},
     }
     try:
-        with zipfile.ZipFile(path) as package:
-            members = package.infolist()
-            if len(members) > MAX_PACKAGE_MEMBERS:
-                raise OfficeOSError("Candidate package contains too many parts.")
-            if sum(member.file_size for member in members) > MAX_PACKAGE_UNCOMPRESSED_BYTES:
-                raise OfficeOSError("Candidate package expands beyond the validation limit.")
+        with bounded_index_package(path) as package:
             bad_member = package.testzip()
             if bad_member:
                 raise OfficeOSError(f"Candidate package has a corrupt part: {bad_member}")

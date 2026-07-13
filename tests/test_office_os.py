@@ -277,6 +277,24 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("PLUGIN_DATA", json.loads(completed.stdout)["error"])
 
+    def test_core_rejects_claude_only_plugin_data(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("PLUGIN_DATA", None)
+        environment["CLAUDE_PLUGIN_DATA"] = os.fspath(self.plugin_data)
+        completed = subprocess.run(
+            [sys.executable, os.fspath(CORE), "status", "--cwd", os.fspath(self.workspace)],
+            cwd=self.workspace,
+            env=environment,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("PLUGIN_DATA", json.loads(completed.stdout)["error"])
+        self.assertFalse(self.plugin_data.exists())
+
     def test_index_upserts_queries_chinese_and_purges_deleted_sources(self) -> None:
         workbook = self.workspace / "budget.xlsx"
         document = self.workspace / "plan.docx"
@@ -406,6 +424,50 @@ class CoreCase(unittest.TestCase):
             self.assertIn("index limit", reason)
             with self.assertRaises(module.OfficeOSError):
                 module.extract_docx(document)
+
+    def test_index_over_limit_document_clears_chunks_and_retries(self) -> None:
+        module = load_core_module()
+        document = self.workspace / "over-limit.docx"
+        write_docx(
+            document,
+            "".join(f"{number:08x}" for number in range(1_600)),
+        )
+        arguments = SimpleNamespace(
+            cwd=os.fspath(self.workspace),
+            path=[os.fspath(document)],
+            allow_sensitive_content=[],
+            grant_full_text_root=[os.fspath(self.workspace)],
+            revoke_full_text_root=[],
+            metadata_only=False,
+        )
+        messages: list[dict] = []
+
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            with mock.patch.object(module, "MAX_KNOWLEDGE_CHUNKS", 1):
+                with mock.patch.object(module, "json_print", side_effect=messages.append):
+                    self.assertEqual(module.command_index(arguments), 0)
+                    self.assertEqual(module.command_index(arguments), 0)
+
+        self.assertEqual(messages[0]["errors"], 1)
+        self.assertEqual(messages[1]["errors"], 1)
+        self.assertEqual(messages[1]["unchanged"], 0)
+        database = sqlite3.connect(self.workspace_data() / "office.db")
+        try:
+            row = database.execute(
+                """
+                SELECT d.index_status, d.error, COUNT(c.id)
+                FROM documents AS d
+                LEFT JOIN chunks AS c ON c.document_id = d.id
+                WHERE d.path = ?
+                GROUP BY d.id
+                """,
+                (os.path.normcase(os.fspath(document)),),
+            ).fetchone()
+        finally:
+            database.close()
+        self.assertEqual(row[0], "error")
+        self.assertIn("limit", row[1])
+        self.assertEqual(row[2], 0)
 
     def test_knowledge_map_retention_caps_documents_chunks_and_text(self) -> None:
         module = load_core_module()
@@ -1115,6 +1177,67 @@ class CoreCase(unittest.TestCase):
             "確認後發布",
         )
         self.assertEqual(published["status"], "published")
+
+    def test_fixed_output_confirm_resumes_awaiting_user(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state, _ = self.run_core(
+            "begin",
+            "--task",
+            "resume confirmation",
+            "--intent",
+            "update",
+            "--object",
+            "office",
+            "--permission",
+            "fixed-output-write",
+            "--qa",
+            "fast",
+            "--units",
+            "1",
+            "--source",
+            os.fspath(source),
+        )
+        self.assertEqual(state["status"], "awaiting_confirmation")
+
+        waiting, _ = self.run_core("await-user")
+        self.assertEqual(waiting["status"], "awaiting_user")
+        self.assertFalse(waiting["proposal_confirmed"])
+
+        confirmed, _ = self.run_core("confirm")
+        self.assertEqual(confirmed["status"], "executing")
+        self.assertTrue(confirmed["proposal_confirmed"])
+        self.assertFalse(confirmed["waiting_for_user"])
+
+    def test_publish_validation_rejects_shared_archive_limits_before_parse(self) -> None:
+        module = load_core_module()
+        candidate = self.workspace / "candidate.xlsx"
+        write_xlsx(candidate, "compressed archive marker" * 256)
+        limits = (
+            ("archive size", "MAX_INDEX_PACKAGE_ARCHIVE_BYTES"),
+            ("member count", "MAX_INDEX_PACKAGE_MEMBERS"),
+            ("member size", "MAX_INDEX_PACKAGE_MEMBER_BYTES"),
+            ("total size", "MAX_INDEX_PACKAGE_UNCOMPRESSED_BYTES"),
+            ("compression ratio", "MAX_INDEX_PACKAGE_COMPRESSION_RATIO"),
+        )
+
+        for label, constant in limits:
+            with self.subTest(limit=label):
+                with mock.patch.object(module, constant, 1):
+                    with mock.patch.object(
+                        module.zipfile.ZipFile,
+                        "testzip",
+                        side_effect=AssertionError("testzip must not run"),
+                    ) as testzip:
+                        with mock.patch.object(
+                            module,
+                            "validate_openxml",
+                            side_effect=AssertionError("Open XML parsing must not run"),
+                        ) as validate_openxml:
+                            with self.assertRaisesRegex(module.OfficeOSError, label):
+                                module.validate_candidate(candidate)
+                    testzip.assert_not_called()
+                    validate_openxml.assert_not_called()
 
     def test_source_free_run_rejects_a_late_source_at_publish(self) -> None:
         state = self.begin_publish_run("來源自由建立", ())

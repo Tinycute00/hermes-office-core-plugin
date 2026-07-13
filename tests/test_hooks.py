@@ -108,6 +108,27 @@ class HookCase(unittest.TestCase):
         self.assertIn(os.fspath(self.plugin_data), context)
         self.assertIsNone(self.run_hook(payload))
 
+    def test_hook_rejects_claude_only_plugin_data(self) -> None:
+        environment = os.environ.copy()
+        environment.pop("PLUGIN_DATA", None)
+        environment["CLAUDE_PLUGIN_DATA"] = os.fspath(self.plugin_data)
+        environment["PLUGIN_ROOT"] = os.fspath(ROOT)
+
+        completed = subprocess.run(
+            [sys.executable, os.fspath(HOOK)],
+            input=json.dumps(self.prompt_payload("review budget.xlsx")),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            env=environment,
+            cwd=self.workspace,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("PLUGIN_DATA", completed.stderr)
+        self.assertFalse(self.plugin_data.exists())
+
     def test_single_object_schedule_routes_office_and_object_references(self) -> None:
         result = self.run_hook(
             self.prompt_payload("每週更新 budget.xlsx 並保留排程", "turn-schedule")

@@ -154,7 +154,7 @@ def canonical_workspace(cwd: str | None) -> str:
 
 
 def plugin_data_root() -> Path:
-    configured = os.environ.get("PLUGIN_DATA") or os.environ.get("CLAUDE_PLUGIN_DATA")
+    configured = os.environ.get("PLUGIN_DATA")
     if not configured:
         raise HookStateError("Office OS requires the plugin-owned PLUGIN_DATA value.")
     return Path(os.path.abspath(configured))
