@@ -4,7 +4,7 @@ Office OS optionally uses a local adapter around a checksum-pinned OfficeCLI exe
 
 ## Consent and activation
 
-Resolve the plugin root from `SKILL.md`, then run the read-only manager check:
+Use the authoritative `PLUGIN_DATA` path injected by the Office OS hook for every core and manager child process. Do not infer the fallback path or persist the variable globally; a missing injected value means the installed plugin must be restarted or repaired before writable work. Resolve the plugin root from `SKILL.md`, then run the read-only manager check in that child environment:
 
     python "<plugin-root>/scripts/officecli_manager.py" status
 
@@ -18,17 +18,17 @@ The manager selects OfficeCLI `1.0.135` at source commit `d2d9c60f44537004c3e1f4
 
 The adapter exposes exactly one tool, `officecli`, with one required input: `command: string[]` containing 1 to 128 tokens. Never send a shell command, an alternate argument field, or an extra tool parameter.
 
-Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Before a tool call:
+Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Each successful `office_os.py begin` reserves and returns one run-specific `candidate_directory` below that root. Before a tool call:
 
 1. fingerprint every source through the Office OS core;
-2. create a new candidate or copy the source into that fixed staging root;
+2. create a new candidate or copy the source into the returned `candidate_directory`;
 3. pass only the staged candidate and contained file-bearing property values;
 4. validate and render the candidate through the adapter;
-5. publish with `office_os.py publish`, which rechecks source fingerprints and write authority.
+5. publish that exact run-contained candidate with `office_os.py publish`, which rejects sibling-run, workspace-scratch, linked, and hard-linked candidates before rechecking source fingerprints and write authority.
 
-Never pass an original source path. The adapter rejects lexical, canonical, real-path, closest-existing-parent, symlink, junction, reparse-point, and prefix-boundary escapes. The only excluded threat is a malicious concurrent local link swap after validation.
+Never pass an original source path. The adapter rejects lexical, canonical, real-path, closest-existing-parent, symlink, junction, reparse-point, hard-link, and prefix-boundary escapes. The only excluded threat is a malicious concurrent local link swap after validation.
 
-The staging root is production-bounded, not a history folder. Successful publish, completion, and explicit failure remove the managed candidate. A failed publish retains it only while revision is active. `begin` and `cleanup` reclaim files older than 24 hours and then keep at most 32 ordinary files totaling at most 2 GiB. Linked staging roots and linked entries are never followed or deleted.
+The staging root is production-bounded, not a history folder. `begin` registers the run directory before authoring starts, so the active draft is preserved across another workspace's cleanup before its first publish. Successful publish, completion, and explicit failure remove the run directory and its managed candidates. `begin` and `cleanup` reclaim unreserved files older than 24 hours and then keep at most 32 ordinary files totaling at most 2 GiB. Malformed active-run inventory and linked staging roots fail closed; nested link objects are removed without following or touching their targets.
 
 ## Allowed command grammar
 

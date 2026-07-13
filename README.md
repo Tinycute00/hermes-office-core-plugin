@@ -21,7 +21,7 @@ The first visible line of an Office OS turn is an intent envelope such as:
 
 ## Output behavior
 
-Source files are never overwritten. Results go to a sibling folder named `Office OS Output`. Repeating the same task replaces the same stable output instead of creating timestamped copies. Manual work keeps no history. Scheduled work keeps at most `.bak.1`, `.bak.2`, and `.bak.3`; unchanged sources are a no-op.
+Source files are never overwritten. Results go to a non-linked sibling folder named `Office OS Output`. Repeating the same task replaces the same collision-safe stable output instead of creating timestamped or caller-selected copies. Manual work keeps no history. Scheduled work keeps at most `.bak.1`, `.bak.2`, and `.bak.3`; unchanged sources are a no-op.
 
 ## Local knowledge map
 
@@ -40,12 +40,13 @@ Office OS includes an optional local adapter for structured Word, Excel, and Pow
 No executable is downloaded until the owner approves it. After approval, the skill runs the idempotent manager once:
 
 ```powershell
+$env:PLUGIN_DATA = "<exact value injected by the Office OS hook>"
 python scripts/officecli_manager.py install --accept-download
 ```
 
-The manager keeps one verified version under plugin data and prunes only ordinary old-version siblings after successful verification. It does not place the executable on `PATH`, install another skill, register another MCP server, or mutate user OfficeCLI configuration.
+The hook supplies the authoritative plugin-data root to the workflow. Every local core and manager command receives that exact value in its child environment, so its candidates, state, and runtime match the MCP server's root; the workflow never infers a second root. The manager keeps one verified version under plugin data and prunes only ordinary old-version siblings after successful verification. It does not place the executable on `PATH`, install another skill, register another MCP server, or mutate user OfficeCLI configuration.
 
-The adapter derives the fixed `PLUGIN_DATA/officecli-candidates` staging root itself. Copy a source into that root, operate only on the candidate, then validate and publish through the Office OS core to the stable sibling `Office OS Output` target. The core removes completed/closed candidates, reclaims candidates older than 24 hours, and caps staging at 32 files and 2 GiB without following links. Callers cannot choose the candidate root or screenshot destination. Normal commands are limited to 60 seconds, screenshots to 120 seconds, and both process streams and returned PNG data are bounded.
+The adapter derives the fixed `PLUGIN_DATA/officecli-candidates` staging root itself. `office_os.py begin` reserves and returns one run-specific `candidate_directory`; copy a source there, operate only on that candidate, then validate and publish through the Office OS core to the stable sibling `Office OS Output` target. The core preserves that active directory across workspaces before the first publish, removes completed/closed candidates, reclaims unreserved candidates older than 24 hours, and caps staging at 32 files and 2 GiB. Malformed active-run inventory and linked roots fail closed; hard-linked files are rejected, and nested link objects are removed without following their targets. Callers cannot choose the candidate root, output identity, or screenshot destination. Normal commands are limited to 60 seconds, screenshots to 120 seconds, and both process streams and returned PNG data are bounded.
 
 Each allowlisted child command receives update, installation, and resident suppression in its child-command environment only. The adapter never starts OfficeCLI's upstream MCP mode or calls an unverified executable directly, and it rechecks the pinned SHA before every call. These controls do not change persistent user settings or promise behavior outside the adapter.
 
@@ -66,6 +67,7 @@ After the result is accepted, Office OS offers to create a recurring local Codex
 ## Development
 
 ```powershell
+$env:PLUGIN_DATA = Join-Path $env:TEMP "office-os-dev-data" # isolated development only
 python -m unittest discover -s tests -v
 python skills/office-os/scripts/office_os.py doctor
 python scripts/officecli_manager.py status

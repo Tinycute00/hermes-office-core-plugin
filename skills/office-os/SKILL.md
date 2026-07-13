@@ -39,13 +39,15 @@ Skip questions whose answers are already visible or safely inferable. Once the t
 
 ## 3. Start a bounded run
 
-Resolve the bundled scripts/office_os.py from this SKILL.md and invoke it by absolute path. In the examples below, <office-os> means this skill directory. Use it quietly to create workspace state and a stable task key:
+Capture the authoritative `PLUGIN_DATA` value injected by the Office OS hook for this task. Pass that exact value in the child environment of every `office_os.py` and `officecli_manager.py` invocation; do not persist it globally, infer a fallback path, or substitute a caller-selected root. In PowerShell, set `$env:PLUGIN_DATA` for the command; on POSIX, prefix the command with `PLUGIN_DATA="<hook value>"`. Never run a core or manager command without that exact value. If the hook did not provide it, stop writable work and report that the installed plugin must be restarted or repaired.
+
+Resolve the bundled scripts/office_os.py from this SKILL.md and invoke it by absolute path. In the examples below, <office-os> means this skill directory, and every command inherits the authoritative child environment above. Use it quietly to create workspace state and a stable task key:
 
     python "<office-os>/scripts/office_os.py" begin --task "<stable task label>" --source "<source>" --intent <intent> --object <object> --permission <permission> --qa <qa> --units <count>
 
-Repeat --source for cross-file work. Omit it only for a genuinely source-free creation.
+Repeat --source for cross-file work. Omit it only for a genuinely source-free creation. Read the returned `candidate_directory`; it is the run-specific authoring directory under the fixed `PLUGIN_DATA/officecli-candidates` staging root.
 
-Keep sources unchanged. Use the stable task label as the task key, publish writable results to a sibling `Office OS Output` folder, and replace the same stable target when that task repeats. Never create timestamped output identities.
+Keep sources unchanged. Use the stable task label as the task key, publish writable results to a sibling `Office OS Output` folder, and replace the same stable target when that task repeats. That identity is collision-safe: every task key and task-derived output name includes a digest of its normalized label, so punctuation collisions stay distinct while case and whitespace variants remain the same task. Never create timestamped output identities or caller-selected output identities.
 
 Use Codex's installed spreadsheet, document, presentation, and PDF capabilities for authoring and visual inspection. Use this skill's Python core for fingerprints, indexing, run state, overlap control, candidate validation, backup rotation, cleanup, and final publish.
 
@@ -53,7 +55,7 @@ For `.xlsx`, `.docx`, or `.pptx` authoring and rendered QA, quietly check the ma
 
     python "<plugin-root>/scripts/officecli_manager.py" status
 
-If it is installed, prefer the managed local `officecli` adapter for deterministic structure edits, JSON inspection, validation, and screenshots. Before any adapter call, create a new candidate or copy the source into the fixed `PLUGIN_DATA/officecli-candidates` staging root; pass only that candidate, never a source. The core removes a managed candidate after successful publish, completion, or an explicitly failed run; a failed publish keeps it only while revision remains active. Every new run and explicit cleanup reclaims candidates older than 24 hours and enforces at most 32 files and 2 GiB without following links. If the runtime is missing, ask one short question before downloading the executable. After approval, install the pinned runtime once with `install --accept-download`; the operation is checksum-verified and idempotent. If approval is declined or the adapter is unavailable, continue with Codex's installed spreadsheet, document, presentation, and PDF capabilities, still authoring a candidate and publishing only through the Office OS core.
+If it is installed, prefer the managed local `officecli` adapter for deterministic structure edits, JSON inspection, validation, and screenshots. Before any adapter call, create a new candidate or copy the source into the `candidate_directory` returned by `begin`; pass only that candidate, never a source or hard link. The core reserves that directory before first publish, preserves it while the run is active across workspaces, and removes it after successful publish, completion, or an explicitly failed run. Every new run and explicit cleanup reclaims unreserved candidates older than 24 hours and enforces at most 32 files and 2 GiB; malformed active-run inventory fails cleanup closed, and nested link objects are removed without following their targets. If the runtime is missing, ask one short question before downloading the executable. After approval, install the pinned runtime once with `install --accept-download`; the operation is checksum-verified and idempotent. If approval is declined or the adapter is unavailable, continue with Codex's installed spreadsheet, document, presentation, and PDF capabilities, still authoring a candidate and publishing only through the Office OS core.
 
 ## 4. Execute in useful chunks
 
@@ -75,7 +77,7 @@ Use 快速 by default: structural and content checks for changed units, plus an 
 
 ## 5. Validate and publish
 
-Create the candidate in the target directory or same volume. Validate it before replacement:
+Create the candidate only inside the current `candidate_directory` returned by `begin`; never publish from a sibling run directory, source path, workspace scratch path, link, or hard link. The core creates its own same-volume stage for replacement. Validate ZIP bounds, required Open XML roots, every XML part, and internal relationship targets before replacement:
 
 - extension and package structure are valid;
 - expected changed units exist;
