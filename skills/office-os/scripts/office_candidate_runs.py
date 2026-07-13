@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 
 from office_candidates import CandidateLifecycleError
+from office_candidates import assert_candidate_quota
 from office_candidates import candidate_root
 from office_candidates import contained
 from office_candidates import inventory
@@ -52,6 +53,7 @@ def reserve_candidate_directory(data_root: Path, run_id: str) -> Path:
     root = validated_root(data_root)
     if root is None:
         raise CandidateLifecycleError("Managed OfficeCLI candidate root is unavailable.")
+    assert_candidate_quota(data_root)
     directory = lexical_root / run_id
     if os.path.lexists(directory):
         if is_linklike(directory) or not directory.is_dir():
@@ -153,6 +155,7 @@ def validated_run_candidate(
         raise CandidateLifecycleError(
             "Candidate is outside the active run's reserved candidate directory."
         )
+    assert_candidate_quota(data_root)
     return resolved
 
 

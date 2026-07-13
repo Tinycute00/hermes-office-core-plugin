@@ -106,6 +106,22 @@ def inventory(root: Path) -> tuple[list[tuple[int, int, Path]], list[Path], list
     return files, directories, links
 
 
+def assert_candidate_quota(data_root: Path) -> None:
+    root = validated_root(data_root)
+    if root is None:
+        return
+    files, _directories, links = inventory(root)
+    if links:
+        raise CandidateLifecycleError(
+            "Managed OfficeCLI candidate entries must not contain links or reparse points."
+        )
+    if (
+        len(files) > MAX_CANDIDATE_FILES
+        or sum(size for _modified, size, _path in files) > MAX_CANDIDATE_BYTES
+    ):
+        raise CandidateLifecycleError("Managed OfficeCLI candidate limits are exhausted.")
+
+
 def remove_link_entry(path: Path) -> None:
     try:
         status = path.lstat()

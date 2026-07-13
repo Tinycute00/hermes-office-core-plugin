@@ -24,6 +24,7 @@ MANAGED_ENV: Final = {
     "OFFICECLI_NO_AUTO_INSTALL": "1",
     "OFFICECLI_NO_AUTO_RESIDENT": "1",
 }
+PLATFORM_ENV_KEYS: Final = frozenset({"PATH", "TMPDIR", "TMP", "TEMP"} | ({"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"} if os.name == "nt" else set()))
 
 
 class OfficeCLIManagerError(RuntimeError):
@@ -205,7 +206,7 @@ def runtime_status(lock: dict | None = None, data_root: Path | None = None) -> d
 
 
 def side_effect_free_environment() -> dict[str, str]:
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("OFFICECLI_")}
+    environment = {key: value for key, value in os.environ.items() if key.upper() in PLATFORM_ENV_KEYS}
     environment.update(MANAGED_ENV)
     return environment
 

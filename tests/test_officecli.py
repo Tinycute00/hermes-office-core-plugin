@@ -23,6 +23,10 @@ JSONRPC = ROOT / "scripts" / "officecli-mcp" / "jsonrpc.cjs"
 POLICY = ROOT / "scripts" / "officecli-mcp" / "policy.cjs"
 RUNNER = ROOT / "scripts" / "officecli-mcp" / "runner.cjs"
 PATHS = ROOT / "scripts" / "officecli-mcp" / "paths.cjs"
+CANDIDATES = ROOT / "skills" / "office-os" / "scripts" / "office_candidates.py"
+CANDIDATE_RUNS = (
+    ROOT / "skills" / "office-os" / "scripts" / "office_candidate_runs.py"
+)
 NODE = shutil.which("node")
 
 
@@ -40,6 +44,31 @@ def load_manager():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def load_candidate_modules():
+    scripts = os.fspath(CANDIDATES.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    sys.modules.pop("office_candidate_runs", None)
+    sys.modules.pop("office_candidates", None)
+    candidate_spec = importlib.util.spec_from_file_location(
+        "office_candidates", CANDIDATES
+    )
+    if candidate_spec is None or candidate_spec.loader is None:
+        raise OfficeCLITestSetupError("Cannot load OfficeCLI candidate module.")
+    candidates = importlib.util.module_from_spec(candidate_spec)
+    sys.modules[candidate_spec.name] = candidates
+    candidate_spec.loader.exec_module(candidates)
+    runs_spec = importlib.util.spec_from_file_location(
+        "office_candidate_runs", CANDIDATE_RUNS
+    )
+    if runs_spec is None or runs_spec.loader is None:
+        raise OfficeCLITestSetupError("Cannot load OfficeCLI candidate-run module.")
+    runs = importlib.util.module_from_spec(runs_spec)
+    sys.modules[runs_spec.name] = runs
+    runs_spec.loader.exec_module(runs)
+    return candidates, runs
 
 
 def run_jsonrpc(payload: bytes) -> subprocess.CompletedProcess[bytes]:
@@ -257,7 +286,8 @@ class OfficeCLICase(unittest.TestCase):
                         "OFFICECLI_UNTRUSTED": "upper",
                         "officecli_lower_untrusted": "lower",
                         "OfficeCli_Mixed_Untrusted": "mixed",
-                        "UNRELATED": "preserved",
+                        "ARBITRARY_SENTINEL_SECRET": "not-for-officecli",
+                        "PLUGIN_DATA": os.fspath(data_root),
                     },
                 },
                 data_root,
@@ -275,7 +305,38 @@ class OfficeCLICase(unittest.TestCase):
                 "OFFICECLI_NO_AUTO_RESIDENT": "1",
             },
         )
-        self.assertEqual(environment["UNRELATED"], "preserved")
+        self.assertNotIn("ARBITRARY_SENTINEL_SECRET", environment)
+        self.assertNotIn("PLUGIN_DATA", environment)
+
+    def test_runner_child_process_drops_ambient_credentials_and_plugin_data(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            (data_root / "officecli-candidates").mkdir(parents=True)
+            capture = base / "runner-child-environment.json"
+            probe = (
+                "const fs=require('node:fs');"
+                "const names=['ARBITRARY_SENTINEL_SECRET','PLUGIN_DATA'];"
+                "const visible=Object.fromEntries(names.map(name=>[name,"
+                "Object.prototype.hasOwnProperty.call(process.env,name)]));"
+                "fs.writeFileSync(process.argv[1],JSON.stringify(visible));"
+            )
+            result = run_runner(
+                {
+                    "parsed": {"argv": ["-e", probe, os.fspath(capture)], "screenshot": False},
+                    "inheritedEnvironment": {
+                        "ARBITRARY_SENTINEL_SECRET": "not-for-officecli",
+                        "PLUGIN_DATA": os.fspath(data_root),
+                    },
+                },
+                data_root,
+            )
+            self.assertFalse(result.get("isError", False))
+            visible = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(
+            visible,
+            {"ARBITRARY_SENTINEL_SECRET": False, "PLUGIN_DATA": False},
+        )
 
     def test_runner_kills_tree_on_timeout_and_overflow(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -331,7 +392,10 @@ class OfficeCLICase(unittest.TestCase):
         self.assertEqual(result["error"], "OfficeCLI command timed out. Process termination did not complete.")
 
     def test_screenshot_success_and_failure_cleanup(self) -> None:
-        png = b"\x89PNG\r\n\x1a\n" + b"minimal"
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+            "0000000b49444154789c6360000200000500017a5eab3f0000000049454e44ae426082"
+        )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             base = Path(temporary)
             data_root = base / "plugin-data"
@@ -343,7 +407,9 @@ class OfficeCLICase(unittest.TestCase):
                 "const out=args[args.indexOf('--out')+1];"
                 "if(args.includes('missing'))process.exit(0);"
                 "if(args.includes('fail')){fs.writeFileSync(out,'bad');process.exit(2);}"
-                "fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a6d696e696d616c','hex'));",
+                "if(args.includes('signature')){fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a','hex'));process.exit(0);}"
+                "if(args.includes('truncated')){fs.writeFileSync(out,Buffer.from('89504e470d0a1a0a0000000d49484452','hex'));process.exit(0);}"
+                f"fs.writeFileSync(out,Buffer.from('{png.hex()}','hex'));",
                 encoding="utf-8",
             )
             success = run_runner(
@@ -367,8 +433,93 @@ class OfficeCLICase(unittest.TestCase):
             self.assertTrue(missing["isError"])
             self.assertNotIn("error", missing)
             self.assertEqual(missing["content"][0]["text"], "Screenshot processing failed.")
+            for mode in ("signature", "truncated"):
+                with self.subTest(mode=mode):
+                    malformed = run_runner(
+                        {"parsed": {"argv": [os.fspath(fake), mode], "screenshot": True}},
+                        data_root,
+                    )
+                    self.assertTrue(malformed.get("isError", False), malformed)
+                    self.assertIn("not a PNG", malformed["content"][0]["text"])
             leftovers = [path for path in candidate_root.rglob("*") if ".officecli-shot-" in path.name]
             self.assertEqual(leftovers, [])
+
+    def test_runner_rejects_preexisting_candidate_quota_before_child_process(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            for number in range(33):
+                (candidate_root / f"candidate-{number}.xlsx").write_bytes(b"x")
+            marker = base / "child-ran"
+            result = run_runner(
+                {
+                    "parsed": {
+                        "argv": [
+                            "-e",
+                            "require('node:fs').writeFileSync(process.argv[1],'ran')",
+                            os.fspath(marker),
+                        ],
+                        "screenshot": False,
+                    }
+                },
+                data_root,
+            )
+            self.assertTrue(result["isError"])
+            self.assertIn("candidate limits", result["content"][0]["text"])
+            self.assertFalse(marker.exists())
+
+    def test_runner_reports_candidate_quota_growth_after_child_process(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            grow = (
+                "const fs=require('node:fs'),path=require('node:path');"
+                "for(let index=0;index<33;index+=1){"
+                "fs.writeFileSync(path.join(process.argv[1],'candidate-'+index+'.xlsx'),'x');}"
+            )
+            result = run_runner(
+                {
+                    "parsed": {
+                        "argv": ["-e", grow, os.fspath(candidate_root)],
+                        "screenshot": False,
+                    }
+                },
+                data_root,
+            )
+            self.assertTrue(result["isError"])
+            self.assertIn("candidate limits", result["content"][0]["text"])
+            self.assertEqual(len(list(candidate_root.iterdir())), 33)
+
+    def test_candidate_run_reservation_fails_closed_when_quota_is_exhausted(self) -> None:
+        candidates, runs = load_candidate_modules()
+        cases = (
+            ("files", 3, b"", 2, 10),
+            ("bytes", 1, b"xxx", 10, 2),
+        )
+        for label, count, content, maximum_files, maximum_bytes in cases:
+            with self.subTest(limit=label):
+                with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+                    data_root = Path(temporary) / "plugin-data"
+                    root = data_root / "officecli-candidates"
+                    root.mkdir(parents=True)
+                    for number in range(count):
+                        (root / f"candidate-{number}.xlsx").write_bytes(content)
+                    run_id = "a" * 32
+                    with mock.patch.object(
+                        candidates, "MAX_CANDIDATE_FILES", maximum_files
+                    ):
+                        with mock.patch.object(
+                            candidates, "MAX_CANDIDATE_BYTES", maximum_bytes
+                        ):
+                            with self.assertRaisesRegex(
+                                candidates.CandidateLifecycleError, "limits"
+                            ):
+                                runs.reserve_candidate_directory(data_root, run_id)
+                    self.assertFalse((root / run_id).exists())
 
     def test_tool_schema_is_array_only(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
@@ -804,7 +955,7 @@ class OfficeCLICase(unittest.TestCase):
             self.assertIn("/releases/download/v1.0.135/", asset["url"])
             self.assertTrue(asset["url"].endswith(asset["filename"]))
 
-    def test_child_environment_contains_only_managed_officecli_keys(self) -> None:
+    def test_child_environment_contains_only_platform_and_managed_officecli_keys(self) -> None:
         manager = load_manager()
         runtime = sys.modules["officecli_runtime"]
         with mock.patch.dict(
@@ -813,7 +964,8 @@ class OfficeCLICase(unittest.TestCase):
                 "OFFICECLI_SKIP_UPDATE": "0",
                 "OFFICECLI_BATCH_ALLOW_STDIN_REDIRECT": "1",
                 "OFFICECLI_UNTRUSTED": "present",
-                "UNRELATED": "preserved",
+                "ARBITRARY_SENTINEL_SECRET": "not-for-officecli",
+                "PLUGIN_DATA": "not-for-officecli",
             },
             clear=False,
         ):
@@ -831,7 +983,54 @@ class OfficeCLICase(unittest.TestCase):
                 "OFFICECLI_NO_AUTO_RESIDENT": "1",
             },
         )
-        self.assertEqual(environment["UNRELATED"], "preserved")
+        self.assertNotIn("ARBITRARY_SENTINEL_SECRET", environment)
+        self.assertNotIn("PLUGIN_DATA", environment)
+
+    def test_runtime_verification_child_drops_ambient_credentials_and_plugin_data(self) -> None:
+        load_manager()
+        runtime = sys.modules["officecli_runtime"]
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            capture = base / "runtime-child-environment.json"
+            probe = base / "capture_environment.py"
+            probe.write_text(
+                "import json\n"
+                "import os\n"
+                "from pathlib import Path\n"
+                "names = ('ARBITRARY_SENTINEL_SECRET', 'PLUGIN_DATA')\n"
+                f"Path({os.fspath(capture)!r}).write_text("
+                "json.dumps({name: name in os.environ for name in names}), "
+                "encoding='utf-8')\n"
+                "print('1.0.135')\n",
+                encoding="utf-8",
+            )
+            if os.name == "nt":
+                binary = base / "fake-officecli.cmd"
+                binary.write_text(
+                    f'@echo off\r\n"{sys.executable}" "{probe}" %*\r\n',
+                    encoding="utf-8",
+                )
+            else:
+                binary = base / "fake-officecli"
+                binary.write_text(
+                    f"#!{sys.executable}\n{probe.read_text(encoding='utf-8')}",
+                    encoding="utf-8",
+                )
+                binary.chmod(0o700)
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "ARBITRARY_SENTINEL_SECRET": "not-for-officecli",
+                    "PLUGIN_DATA": "not-for-officecli",
+                },
+                clear=False,
+            ):
+                self.assertIn("1.0.135", runtime.verify_version(binary, "1.0.135"))
+            visible = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(
+            visible,
+            {"ARBITRARY_SENTINEL_SECRET": False, "PLUGIN_DATA": False},
+        )
 
     def test_manager_prunes_only_safe_old_siblings(self) -> None:
         manager = load_manager()
