@@ -84,11 +84,11 @@ class ContractCase(unittest.TestCase):
 
         self.assertTrue(
             description.startswith(
-                "Source-free Office intake: first visible line is the exact hook-supplied intent envelope"
+                "Source-free Office intake: first visible line is the exact hook-supplied intent envelope plus office-os rationale"
             ),
             description,
         )
-        self.assertIn("first Windows skill read uses explicit UTF-8", description)
+        self.assertIn("SKILL.md is ASCII-only and loaded once", description)
         self.assertIn("final reply repeats the envelope", description)
         self.assertIn("intent envelope, then source-path question", description)
         self.assertNotIn("Prefer", description)
@@ -97,13 +97,14 @@ class ContractCase(unittest.TestCase):
     def test_skill_source_has_no_bom_for_codex_discovery(self) -> None:
         source = (ROOT / "skills" / "office-os" / "SKILL.md").read_bytes()
         self.assertFalse(source.startswith(b"\xef\xbb\xbf"), source[:3].hex())
+        self.assertTrue(source.isascii(), "SKILL.md must be safe under legacy text readers")
 
     def test_office_workflow_policy_contract(self) -> None:
         text = (ROOT / "skills" / "office-os" / "SKILL.md").read_text(
             encoding="utf-8"
         )
         exactly_once = (
-            "意圖：<意圖>｜物件：<物件>｜權限：<權限>｜檢查：<檢查>",
+            "Use the exact localized envelope shape supplied by the Office OS hook",
             "ask exactly one short question at a time",
             "PLUGIN_DATA/officecli-candidates",
             "at most 32 files and 2 GiB",
@@ -118,9 +119,9 @@ class ContractCase(unittest.TestCase):
         for marker in exactly_once:
             self.assertEqual(text.count(marker), 1, marker)
         for semantic_unit in (
-            "Excel: sheet → table/range → formula family/chart",
-            "Word: heading/topic → paragraph/table",
-            "PowerPoint: slide → shape tree",
+            "Excel: sheet -> table/range -> formula family/chart",
+            "Word: heading/topic -> paragraph/table",
+            "PowerPoint: slide -> shape tree",
         ):
             self.assertIn(semantic_unit, text)
         self.assertIn("authoritative `PLUGIN_DATA` value injected by the Office OS hook", text)
@@ -159,18 +160,18 @@ class ContractCase(unittest.TestCase):
             self.assertIn("<required-final-reply>", text)
             self.assertIn("<required-first-user-visible-line>", text)
             self.assertIn(
-                "first user-visible text line must equal the supplied intent envelope verbatim",
+                "first user-visible text line must equal the supplied skill-use announcement verbatim",
                 text.lower(),
             )
             self.assertIn(
-                "If the host requires a skill-use announcement, use exactly that envelope line as the entire announcement",
+                "The supplied line already states which skill is being used and why",
                 text,
             )
             self.assertIn("copy", text.lower())
             self.assertIn("verbatim", text)
             self.assertIn("Get-Content -Raw -Encoding UTF8", text)
             self.assertIn(
-                "first Windows PowerShell read of SKILL.md must use explicit UTF-8",
+                "SKILL.md is ASCII-only and should be loaded exactly once",
                 text,
             )
             self.assertNotIn("Prefer the canonical envelope", text)

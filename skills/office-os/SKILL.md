@@ -1,6 +1,6 @@
 ---
 name: office-os
-description: "Source-free Office intake: first visible line is the exact hook-supplied intent envelope; first Windows skill read uses explicit UTF-8; final reply repeats the envelope (intent envelope, then source-path question). No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
+description: "Source-free Office intake: first visible line is the exact hook-supplied intent envelope plus office-os rationale; SKILL.md is ASCII-only and loaded once; final reply repeats the envelope (intent envelope, then source-path question). No Office data work before source. Excel, Word, PowerPoint, PDF workflows."
 ---
 
 # Office OS
@@ -9,24 +9,15 @@ Turn an ordinary office request into a bounded, inspectable workflow. Keep the u
 
 ## 0. Source-free intake
 
-When source-free hook context is present, the first user-visible text line must equal the supplied intent envelope verbatim from <required-first-user-visible-line>, before any tool call or skill load. If the host requires a skill-use announcement, use exactly that envelope line as the entire announcement. Emit no other preamble, plan, progress, or tool-activity message.
+When source-free hook context is present, the first user-visible text line must equal the supplied skill-use announcement verbatim from <required-first-user-visible-line>, before any tool call or skill load. The supplied line already states which skill is being used and why. Emit no other preamble, plan, progress, or tool-activity message.
 
-The first Windows PowerShell read of SKILL.md must use explicit UTF-8 (Get-Content -Raw -Encoding UTF8). Never rely on default Windows PowerShell decoding. If any non-ASCII text appears garbled, reread the file as UTF-8 before replying.
+SKILL.md is ASCII-only and should be loaded exactly once with the host's normal text reader; do not reload it. When reading any Markdown reference on Windows PowerShell, use explicit UTF-8 (Get-Content -Raw -Encoding UTF8).
 
-If the current prompt does not name a local source path or folder, copy the two lines inside the hook context's <required-final-reply> block verbatim as exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Do not reconstruct or paraphrase those lines from this file. The only permitted earlier user-visible text is the exact one-line envelope required above; do not emit any other preamble, plan, skill announcement, tool-activity summary, or progress message. Do not inspect or alter Office data, call office_os.py, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit $office-os invocation can load this skill, but do not load a workflow reference until the user provides a source.
+If the current prompt does not name a local source path or folder, copy the two lines inside the hook context's <required-final-reply> block verbatim as exactly one final assistant message with exactly two non-empty lines: the first line is the intent envelope and the second line is the one short source question. Do not reconstruct or paraphrase those lines from this file. The only permitted earlier user-visible text is the exact one-line skill-use announcement required above; do not emit any other preamble, plan, skill announcement, tool-activity summary, or progress message. Do not inspect or alter Office data, call office_os.py, OfficeCLI, or MCP, or create workspace state, a candidate, an output, or a schedule. An explicit $office-os invocation can load this skill, but do not load a workflow reference until the user provides a source.
 
 ## 1. Classify the current turn
 
-For an Office intake with a named local source path or folder, return exactly one final assistant message. Its first line is the intent envelope:
-
-    意圖：<意圖>｜物件：<物件>｜權限：<權限>｜檢查：<檢查>
-
-Choose one value per dimension:
-
-- 意圖: 查找, 分析, 檢查, 建立, 更新, 整合, 排程
-- 物件: Excel, Word, PowerPoint, PDF, 跨檔案
-- 權限: 唯讀, 固定輸出覆寫, 已授權排程覆寫
-- 檢查: 快速, 加強, 完整
+For an Office intake with a named local source path or folder, return exactly one final assistant message. Its first line is the intent envelope. Use the exact localized envelope shape supplied by the Office OS hook; do not reconstruct localized labels from this file.
 
 If clarification is needed, put exactly one short question after the envelope in that same final message. Emit no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message; none may substitute for this final reply.
 
@@ -49,7 +40,7 @@ If an owner decision is missing, ask exactly one short question at a time. Resol
 
 Skip questions whose answers are already visible or safely inferable. Once the task is clear, state one compact task agreement covering source, result, output, and QA level.
 
-For a manual `固定輸出覆寫` run, ask exactly one short confirmation after that agreement and before candidate authoring, adapter mutation, or publishing: whether to create or replace the named stable output. Do not treat silence, a prior turn, or the task agreement itself as confirmation. On yes, continue autonomously through the agreed chunks; on no, leave sources and outputs unchanged. Read-only and preauthorized scheduled work do not need this extra confirmation.
+For a manual fixed-output overwrite run, ask exactly one short confirmation after that agreement and before candidate authoring, adapter mutation, or publishing: whether to create or replace the named stable output. Do not treat silence, a prior turn, or the task agreement itself as confirmation. On yes, continue autonomously through the agreed chunks; on no, leave sources and outputs unchanged. Read-only and preauthorized scheduled work do not need this extra confirmation.
 
 ## 3. Start a bounded run
 
@@ -83,9 +74,9 @@ If it is installed, prefer the managed local `officecli` adapter for determinist
 
 Select chunks by object:
 
-- Excel: sheet → table/range → formula family/chart. Read [Excel.md](references/Excel.md).
-- Word: heading/topic → paragraph/table. Use pages only for visual QA. Read [Word.md](references/Word.md).
-- PowerPoint: slide → shape tree. Read [PowerPoint.md](references/PowerPoint.md).
+- Excel: sheet -> table/range -> formula family/chart. Read [Excel.md](references/Excel.md).
+- Word: heading/topic -> paragraph/table. Use pages only for visual QA. Read [Word.md](references/Word.md).
+- PowerPoint: slide -> shape tree. Read [PowerPoint.md](references/PowerPoint.md).
 - PDF: relevant page/section, read-only. Read [PDF.md](references/PDF.md).
 - Cross-file: index and retrieve only the source slices needed for the next output unit. Read [Office.md](references/Office.md).
 
@@ -95,7 +86,7 @@ the current task.
 
 After each completed chunk, record real progress with a changed marker and remaining-unit count. A chunk is complete only when its content and local structure pass the selected QA.
 
-Use 快速 by default: structural and content checks for changed units, plus an overview or montage; inspect full size only for changed or flagged units. Escalate to 加強 for formula dependencies, cross-file joins, charts, global layout, masters, section/page-count changes, or low confidence. Use 完整 only when explicitly requested, risk is high, or anomalies repeat.
+Use the quick QA tier by default: structural and content checks for changed units, plus an overview or montage; inspect full size only for changed or flagged units. Escalate to the enhanced tier for formula dependencies, cross-file joins, charts, global layout, masters, section/page-count changes, or low confidence. Use the complete tier only when explicitly requested, risk is high, or anomalies repeat. Agent.md owns the localized QA labels.
 
 ## 5. Validate and publish
 

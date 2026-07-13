@@ -152,20 +152,25 @@ class HookCase(unittest.TestCase):
             context,
         )
         self.assertIn(
-            "If the host requires a skill-use announcement, that exact line must be the entire announcement",
+            "The supplied line is the complete required skill-use announcement and already states which skill is being used and why",
             context,
         )
-        self.assertIn("Get-Content -Raw -Encoding UTF8", context)
         self.assertIn(
-            "The first Windows PowerShell read of SKILL.md must use explicit UTF-8",
+            "SKILL.md is ASCII-only and should be loaded exactly once",
             context,
         )
-        self.assertIn("Never rely on default Windows PowerShell decoding", context)
+        self.assertIn(
+            "read Markdown references with explicit UTF-8 on Windows PowerShell",
+            context,
+        )
         self.assertIn(
             "Copy the two lines inside <required-final-reply> verbatim as the entire final reply",
             context,
         )
-        self.assertIn("意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速", context)
+        self.assertIn(
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速；使用 $office-os，因為這是 Office 工作流程。",
+            context,
+        )
         self.assertNotIn("Prefer this canonical envelope", context)
         self.assertIn("Do not inspect or alter Office data", context)
         self.assertIn("Do not call `office_os.py`, OfficeCLI, or an MCP tool", context)
