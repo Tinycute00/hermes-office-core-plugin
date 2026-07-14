@@ -101,6 +101,11 @@ class HookRegistryCase(unittest.TestCase):
             self.assertIn("OFFICE_OS_MANAGED_HOOK=1", handler["commandWindows"])
             self.assertIn(os.fspath(ROOT), handler["commandWindows"])
             self.assertIn(os.fspath(self.data_root), handler["commandWindows"])
+            self.assertIn("-File", handler["commandWindows"])
+            self.assertIn("-ScriptPath", handler["commandWindows"])
+            self.assertIn("-PluginRoot", handler["commandWindows"])
+            self.assertIn("-PluginData", handler["commandWindows"])
+            self.assertNotIn("-Command", handler["commandWindows"])
 
         self.run_registry("install")
         reinstalled = json.loads(self.config.read_text(encoding="utf-8"))

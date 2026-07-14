@@ -59,10 +59,6 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def powershell_quote(value: str) -> str:
-    return value.replace("'", "''")
-
-
 def commands(plugin_root: Path, data_root: Path) -> tuple[str, str]:
     hook = plugin_root / "hooks" / "office_hook.py"
     bootstrap = plugin_root / "hooks" / "run-python.ps1"
@@ -71,16 +67,13 @@ def commands(plugin_root: Path, data_root: Path) -> tuple[str, str]:
         f"PLUGIN_DATA={shell_quote(os.fspath(data_root))} "
         f"python3 {shell_quote(os.fspath(hook))}"
     )
-    windows_script = (
-        "$env:OFFICE_OS_MANAGED_HOOK=1; "
-        f"$env:PLUGIN_ROOT='{powershell_quote(os.fspath(plugin_root))}'; "
-        f"$env:PLUGIN_DATA='{powershell_quote(os.fspath(data_root))}'; "
-        f"& '{powershell_quote(os.fspath(bootstrap))}' "
-        f"'{powershell_quote(os.fspath(hook))}'"
-    )
     windows = (
-        "powershell -NoProfile -ExecutionPolicy Bypass -Command "
-        f'"{windows_script}"'
+        "powershell -NoProfile -ExecutionPolicy Bypass -File "
+        f'"{os.fspath(bootstrap)}" '
+        f'-ScriptPath "{os.fspath(hook)}" '
+        f'-PluginRoot "{os.fspath(plugin_root)}" '
+        f'-PluginData "{os.fspath(data_root)}" '
+        f'-ManagedMarker "{MANAGED_MARKER}"'
     )
     return posix, windows
 

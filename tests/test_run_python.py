@@ -14,6 +14,7 @@ RUNNER = Path(
     os.environ.get("OFFICE_RUNNER_PATH", os.fspath(ROOT / "hooks" / "run-python.ps1"))
 )
 FIXTURE = (
+    "import json\n"
     "import os\n"
     "import sys\n"
     "\n"
@@ -32,6 +33,19 @@ FIXTURE = (
     "    sys.stdout.buffer.flush()\n"
     "    sys.stderr.buffer.flush()\n"
     "    raise SystemExit(29)\n"
+    "if mode == \"environment\":\n"
+    "    expected = {\n"
+    "        \"PLUGIN_ROOT\": os.environ[\"RUNNER_EXPECTED_PLUGIN_ROOT\"],\n"
+    "        \"PLUGIN_DATA\": os.environ[\"RUNNER_EXPECTED_PLUGIN_DATA\"],\n"
+    "        \"OFFICE_OS_MANAGED_HOOK\": \"1\",\n"
+    "    }\n"
+    "    actual = {key: os.environ.get(key) for key in expected}\n"
+    "    if actual != expected:\n"
+    "        sys.stderr.write(json.dumps(actual, ensure_ascii=False))\n"
+    "        raise SystemExit(41)\n"
+    "    sys.stdout.buffer.write(b\"environment\")\n"
+    "    sys.stdout.buffer.flush()\n"
+    "    raise SystemExit(0)\n"
     "raise SystemExit(2)\n"
 )
 
@@ -58,6 +72,20 @@ class RunPythonPowerShellCase(unittest.TestCase):
             script.write_text(FIXTURE, encoding="utf-8")
             environment = os.environ.copy()
             environment["RUNNER_FIXTURE_MODE"] = mode
+            runner_options: list[str] = []
+            if mode == "environment":
+                plugin_root = fixture_root / "plugin root"
+                plugin_data = fixture_root / "plugin data"
+                environment["RUNNER_EXPECTED_PLUGIN_ROOT"] = os.fspath(plugin_root)
+                environment["RUNNER_EXPECTED_PLUGIN_DATA"] = os.fspath(plugin_data)
+                runner_options = [
+                    "-PluginRoot",
+                    os.fspath(plugin_root),
+                    "-PluginData",
+                    os.fspath(plugin_data),
+                    "-ManagedMarker",
+                    "OFFICE_OS_MANAGED_HOOK=1",
+                ]
             command = [
                 "powershell.exe",
                 "-NoProfile",
@@ -65,7 +93,9 @@ class RunPythonPowerShellCase(unittest.TestCase):
                 "Bypass",
                 "-File",
                 os.fspath(runner_path),
+                "-ScriptPath",
                 os.fspath(script),
+                *runner_options,
             ]
             process = subprocess.Popen(
                 command,
@@ -130,6 +160,13 @@ class RunPythonPowerShellCase(unittest.TestCase):
         self.assertEqual(completed.returncode, 29, completed.stderr)
         self.assertEqual(completed.stdout, b"O" * (256 * 1024) + b"\x00\xffOUT\n")
         self.assertEqual(completed.stderr, b"E" * (256 * 1024) + b"\x00\xffERR\n")
+
+    def test_runner_sets_explicit_plugin_environment(self) -> None:
+        completed = self.run_runner(b"environment-input", mode="environment")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout, b"environment")
+        self.assertEqual(completed.stderr, b"")
 
 
 if __name__ == "__main__":
