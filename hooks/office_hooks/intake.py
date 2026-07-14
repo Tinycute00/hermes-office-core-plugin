@@ -42,8 +42,10 @@ def prompt_reference(prompt: str) -> tuple[str, ...]:
 def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bool:
     session_id = str(payload.get("session_id") or "")
     turn_id = str(payload.get("turn_id") or "")
-    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    key = f"{session_id}:{turn_id}:{digest}"
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    key = hashlib.sha256(
+        f"{session_id}\0{turn_id}\0{prompt_digest}".encode("utf-8")
+    ).hexdigest()
     path = directory / "hook_dedup.json"
     data = read_json(path, {"keys": []})
     keys = data.get("keys", []) if isinstance(data, dict) else []
