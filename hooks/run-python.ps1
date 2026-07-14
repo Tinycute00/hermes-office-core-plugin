@@ -9,23 +9,59 @@ $pythonCandidates = @(
     (Join-Path $HOME ".codex\runtimes\python\python.exe")
 )
 
+$processCandidates = @()
 foreach ($candidate in $pythonCandidates) {
     if (Test-Path -LiteralPath $candidate) {
-        & $candidate $ScriptPath
-        exit $LASTEXITCODE
+        $processCandidates += [pscustomobject]@{
+            FileName = $candidate
+            Arguments = @($ScriptPath)
+        }
     }
 }
 
 foreach ($commandName in @("python3", "python", "py")) {
     $command = Get-Command $commandName -ErrorAction SilentlyContinue
     if ($null -ne $command) {
+        $arguments = @($ScriptPath)
         if ($commandName -eq "py") {
-            & $command.Source -3 $ScriptPath
-        } else {
-            & $command.Source $ScriptPath
+            $arguments = @("-3", $ScriptPath)
         }
-        exit $LASTEXITCODE
+        $processCandidates += [pscustomobject]@{
+            FileName = $command.Source
+            Arguments = $arguments
+        }
     }
+}
+
+foreach ($candidate in $processCandidates) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $candidate.FileName
+    $startInfo.Arguments = ($candidate.Arguments | ForEach-Object {
+        '"' + $_.Replace('"', '\"') + '"'
+    }) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+
+    $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync(
+        [Console]::OpenStandardOutput()
+    )
+    $stderrTask = $process.StandardError.BaseStream.CopyToAsync(
+        [Console]::OpenStandardError()
+    )
+    $inputStream = [Console]::OpenStandardInput()
+    $inputStream.CopyTo($process.StandardInput.BaseStream)
+    $process.StandardInput.BaseStream.Dispose()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    [void]$stdoutTask.GetAwaiter().GetResult()
+    [void]$stderrTask.GetAwaiter().GetResult()
+    exit $exitCode
 }
 
 Write-Error "Office OS requires Python 3. Install Python or use a Codex desktop runtime that bundles it."
