@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ContractCase(unittest.TestCase):
-    def test_plugin_manifest_and_default_hook_location(self) -> None:
+    def test_plugin_manifest_declares_native_hook_files(self) -> None:
         manifest = json.loads(
             (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
@@ -22,8 +22,15 @@ class ContractCase(unittest.TestCase):
         self.assertEqual(manifest["version"], "0.2.0")
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
-        self.assertNotIn("hooks", manifest)
-        self.assertTrue((ROOT / "hooks" / "hooks.json").is_file())
+        self.assertEqual(
+            manifest["hooks"],
+            [
+                "./hooks/session-start-office-os.json",
+                "./hooks/user-prompt-submit-office-os.json",
+                "./hooks/stop-office-os.json",
+            ],
+        )
+        self.assertFalse((ROOT / "hooks" / "hooks.json").exists())
         self.assertLessEqual(len(manifest["interface"]["defaultPrompt"]), 3)
 
         mcp = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -360,22 +367,27 @@ class ContractCase(unittest.TestCase):
             self.assertNotIn(stale, combined)
 
     def test_hooks_cover_only_detection_restore_and_bounded_continuation(self) -> None:
-        hooks = json.loads(
-            (ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8")
-        )["hooks"]
-        self.assertEqual(set(hooks), {"SessionStart", "UserPromptSubmit", "Stop"})
-        self.assertEqual(
-            hooks["SessionStart"][0]["matcher"],
-            "startup|resume|clear|compact",
-        )
-        self.assertNotIn("matcher", hooks["UserPromptSubmit"][0])
-        self.assertNotIn("matcher", hooks["Stop"][0])
-        for groups in hooks.values():
-            for group in groups:
-                for handler in group["hooks"]:
-                    self.assertEqual(handler["type"], "command")
-                    self.assertIn("commandWindows", handler)
-                    self.assertLessEqual(handler["timeout"], 10)
+        expected = {
+            "SessionStart": ("session-start-office-os.json", "startup|resume|clear|compact"),
+            "UserPromptSubmit": ("user-prompt-submit-office-os.json", None),
+            "Stop": ("stop-office-os.json", None),
+        }
+        for event, (filename, matcher) in expected.items():
+            hooks = json.loads(
+                (ROOT / "hooks" / filename).read_text(encoding="utf-8")
+            )["hooks"]
+            self.assertEqual(set(hooks), {event})
+            group = hooks[event][0]
+            if matcher is None:
+                self.assertNotIn("matcher", group)
+            else:
+                self.assertEqual(group["matcher"], matcher)
+            handler = group["hooks"][0]
+            self.assertEqual(handler["type"], "command")
+            self.assertIn("${PLUGIN_ROOT}/hooks/office_hook.py", handler["command"])
+            self.assertIn("commandWindows", handler)
+            self.assertIn("$env:PLUGIN_ROOT", handler["commandWindows"])
+            self.assertLessEqual(handler["timeout"], 10)
 
     def test_hook_refuses_writable_work_without_plugin_data(self) -> None:
         environment = os.environ.copy()
