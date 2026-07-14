@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 from office_hooks.intent import (
@@ -18,11 +19,51 @@ from office_hooks.source_free import (
     expected_source_free_reply,
     source_free_intake_context,
 )
-from office_hooks.state import plugin_data_root, plugin_root, workspace_dir
+from office_hooks.state import HookStateError, plugin_data_root, plugin_root, workspace_dir
 from office_hooks.storage import read_json, write_json
 
 
 MAX_DEDUP_KEYS = 128
+MAINTENANCE_ACTION_PATTERN = re.compile(
+    r"\b(?:update|fix|modify|change|refactor|implement|repair)\b|修正|修改|修復",
+    re.IGNORECASE,
+)
+GENERIC_REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:repo(?:sitory)?|codebase|project)\b|專案|程式庫",
+    re.IGNORECASE,
+)
+STRUCTURAL_REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:hooks?|scripts?|src)\b", re.IGNORECASE
+)
+STRONG_IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:implementation|parser|function|method|module|class)\b|解析器",
+    re.IGNORECASE,
+)
+TEST_IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:unit\s+tests?|integration\s+tests?|test\s+suite)\b|單元測試",
+    re.IGNORECASE,
+)
+
+
+def require_prompt_identity(payload: dict[str, Any]) -> None:
+    for name in ("session_id", "turn_id"):
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise HookStateError(
+                "Office OS intake requires non-empty session_id and turn_id values."
+            )
+
+
+def is_repository_maintenance_prompt(prompt: str) -> bool:
+    if not MAINTENANCE_ACTION_PATTERN.search(prompt):
+        return False
+    has_strong_artifact = bool(STRONG_IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt))
+    return bool(
+        has_strong_artifact and GENERIC_REPOSITORY_ANCHOR_PATTERN.search(prompt)
+    ) or bool(
+        STRUCTURAL_REPOSITORY_ANCHOR_PATTERN.search(prompt)
+        and (has_strong_artifact or TEST_IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt))
+    )
 
 
 def prompt_reference(prompt: str) -> tuple[str, ...]:
@@ -42,8 +83,10 @@ def prompt_reference(prompt: str) -> tuple[str, ...]:
 def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bool:
     session_id = str(payload.get("session_id") or "")
     turn_id = str(payload.get("turn_id") or "")
-    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    key = f"{session_id}:{turn_id}:{digest}"
+    prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    key = hashlib.sha256(
+        f"{session_id}\0{turn_id}\0{prompt_digest}".encode("utf-8")
+    ).hexdigest()
     path = directory / "hook_dedup.json"
     data = read_json(path, {"keys": []})
     keys = data.get("keys", []) if isinstance(data, dict) else []
@@ -58,11 +101,23 @@ def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bo
 def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
     if prompt.lstrip().startswith(STOP_CORRECTION_PREFIX):
+        plugin_data_root()
+        require_prompt_identity(payload)
         discard_pending_intake(payload)
+        return
+    if is_repository_maintenance_prompt(prompt):
+        if os.environ.get("PLUGIN_DATA"):
+            discard_pending_intake(payload)
+        emit({})
         return
     if not prompt or not is_office_prompt(prompt):
+        if not os.environ.get("PLUGIN_DATA"):
+            emit({})
+            return
         discard_pending_intake(payload)
         return
+    plugin_data_root()
+    require_prompt_identity(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     if not has_named_local_source(prompt, cwd):
         remember_pending_intake(payload, expected_source_free_reply(prompt))
