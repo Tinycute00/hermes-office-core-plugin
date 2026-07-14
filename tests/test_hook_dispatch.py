@@ -12,6 +12,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 HOOKS_DIRECTORY = ROOT / "hooks"
 OFFICE_HOOK = HOOKS_DIRECTORY / "office_hook.py"
+UNIMPLEMENTED_TOOL_EVENTS = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+)
 
 if str(HOOKS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIRECTORY))
@@ -60,6 +65,14 @@ class HookDispatchTest(unittest.TestCase):
                 for definition in HOOK_DEFINITIONS
             )
         )
+        self.assertEqual(
+            tuple(
+                definition.event_name
+                for definition in HOOK_DEFINITIONS
+                if definition.event_name in UNIMPLEMENTED_TOOL_EVENTS
+            ),
+            UNIMPLEMENTED_TOOL_EVENTS,
+        )
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -74,15 +87,33 @@ class HookDispatchTest(unittest.TestCase):
         expected_routed = [
             {"hook_event_name": definition.event_name}
             for definition in HOOK_DEFINITIONS
-            if definition.category in handlers
-        ]
-        expected_noops = [
-            definition
-            for definition in HOOK_DEFINITIONS
-            if definition.category not in handlers
+            if definition.event_name not in UNIMPLEMENTED_TOOL_EVENTS
         ]
         self.assertEqual(received, expected_routed)
-        self.assertEqual(emitted, [{}] * len(expected_noops))
+        self.assertEqual(emitted, [{}] * len(UNIMPLEMENTED_TOOL_EVENTS))
+
+    def test_main_noops_real_tool_events_before_state_access(self) -> None:
+        hook = load_office_hook()
+        emitted: list[dict[str, str]] = []
+
+        self.assertEqual(
+            tuple(HOOKS_BY_EVENT[event_name].category for event_name in UNIMPLEMENTED_TOOL_EVENTS),
+            ("tool_guard", "tool_guard", "tool_outcome"),
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(hook, "emit", side_effect=emitted.append),
+        ):
+            for event_name in UNIMPLEMENTED_TOOL_EVENTS:
+                with patch.object(
+                    hook,
+                    "read_input",
+                    return_value={"hook_event_name": event_name},
+                ):
+                    self.assertEqual(hook.main(), 0)
+
+        self.assertEqual(emitted, [{}] * len(UNIMPLEMENTED_TOOL_EVENTS))
 
     def test_main_noops_a_real_unknown_event(self) -> None:
         hook = load_office_hook()

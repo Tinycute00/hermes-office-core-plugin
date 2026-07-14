@@ -13,8 +13,11 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HOOK = ROOT / "hooks" / "office_hook.py"
-sys.path.insert(0, os.fspath(ROOT / "hooks"))
+HOOKS_DIRECTORY = ROOT / "hooks"
+HOOK = HOOKS_DIRECTORY / "office_hook.py"
+
+if str(HOOKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(HOOKS_DIRECTORY))
 
 from office_hooks.intent import QUOTED_LOCAL_PATH_PATTERN
 
@@ -130,6 +133,9 @@ class HookCase(unittest.TestCase):
             path = self.workspace / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
+
+    def test_hook_import_path_is_not_duplicated(self) -> None:
+        self.assertEqual(sys.path.count(str(HOOKS_DIRECTORY)), 1)
 
     def test_office_prompt_injects_skill_and_relevant_reference_once(self) -> None:
         self.create_sources("budget.xlsx")
