@@ -163,8 +163,34 @@ class IntakeRouterCase(unittest.TestCase):
 
         for prompt in prompts:
             with self.subTest(prompt=prompt):
-                self.assertIsNone(self.run_hook(self.prompt_payload(prompt)))
+                self.assertEqual(self.run_hook(self.prompt_payload(prompt)), {})
                 self.assertFalse(self.plugin_data.exists())
+
+    def test_inline_path_repository_maintenance_emits_empty_output_without_state(self) -> None:
+        prompt = (
+            "Update the Excel workbook parser in "
+            f"{chr(96)}hooks/office_hooks/intent.py{chr(96)}"
+        )
+
+        self.assertEqual(self.run_hook(self.prompt_payload(prompt)), {})
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_chinese_repository_maintenance_emits_empty_output_without_state(self) -> None:
+        prompt = "修正專案裡 Excel 工作簿解析器的單元測試"
+
+        self.assertEqual(self.run_hook(self.prompt_payload(prompt)), {})
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_office_workbook_tracking_code_terms_remains_source_free(self) -> None:
+        result = self.run_hook(
+            self.prompt_payload("Create an Excel workbook to track source code unit tests")
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIn(
+            "<office-os-source-free-intake>", result["hookSpecificOutput"]["additionalContext"]
+        )
+        self.assertTrue((self.plugin_data / "pending_intakes.json").is_file())
 
     def test_chinese_office_prompt_remains_source_free_intake(self) -> None:
         result = self.run_hook(self.prompt_payload("檢查 Excel 工作簿"))
@@ -194,10 +220,11 @@ class IntakeRouterCase(unittest.TestCase):
                 self.run_hook(
                     self.prompt_payload("Schedule an Excel spreadsheet", session_id=session_id)
                 )
-                self.assertIsNone(
+                self.assertEqual(
                     self.run_hook(
                         self.prompt_payload(prompt, "turn-maintenance", session_id)
-                    )
+                    ),
+                    {},
                 )
                 self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
                 self.assertFalse((self.plugin_data / "workspaces").exists())

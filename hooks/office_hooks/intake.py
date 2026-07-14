@@ -24,13 +24,17 @@ from office_hooks.storage import read_json, write_json
 
 
 MAX_DEDUP_KEYS = 128
-REPOSITORY_ANCHOR_PATTERN = re.compile(
-    r"\b(?:repo(?:sitory)?|codebase|source\s+code|hooks?|scripts?|src|tests?)\b",
+MAINTENANCE_ACTION_PATTERN = re.compile(
+    r"\b(?:update|fix|modify|change|refactor|implement|repair)\b|修正|修改|修復",
     re.IGNORECASE,
 )
-IMPLEMENTATION_TERM_PATTERN = re.compile(
-    r"\b(?:implementation|parser|function|method|module|class|unit\s+test|"
-    r"integration\s+test|test\s+suite)\b",
+REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:repo(?:sitory)?|codebase|hooks?|scripts?|src)\b|專案|程式庫",
+    re.IGNORECASE,
+)
+IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:implementation|parser|function|method|module|class|unit\s+tests?|"
+    r"integration\s+tests?|test\s+suite)\b|解析器|單元測試",
     re.IGNORECASE,
 )
 
@@ -45,10 +49,10 @@ def require_prompt_identity(payload: dict[str, Any]) -> None:
 
 
 def is_repository_maintenance_prompt(prompt: str) -> bool:
-    cleaned = strip_code(prompt)
     return bool(
-        REPOSITORY_ANCHOR_PATTERN.search(cleaned)
-        and IMPLEMENTATION_TERM_PATTERN.search(cleaned)
+        MAINTENANCE_ACTION_PATTERN.search(prompt)
+        and REPOSITORY_ANCHOR_PATTERN.search(prompt)
+        and IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt)
     )
 
 
@@ -91,7 +95,12 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
         require_prompt_identity(payload)
         discard_pending_intake(payload)
         return
-    if not prompt or is_repository_maintenance_prompt(prompt) or not is_office_prompt(prompt):
+    if is_repository_maintenance_prompt(prompt):
+        if os.environ.get("PLUGIN_DATA"):
+            discard_pending_intake(payload)
+        emit({})
+        return
+    if not prompt or not is_office_prompt(prompt):
         if not os.environ.get("PLUGIN_DATA"):
             emit({})
             return
