@@ -74,13 +74,14 @@ class CompletionHookCase(unittest.TestCase):
         session: str = "session-1",
         turn: str = "turn-1",
         message: str = CANONICAL_REPLY,
+        stop_hook_active: bool = False,
     ) -> dict[str, object]:
         return {
             "hook_event_name": "Stop",
             "session_id": session,
             "turn_id": turn,
             "cwd": os.fspath(self.workspace),
-            "stop_hook_active": False,
+            "stop_hook_active": stop_hook_active,
             "last_assistant_message": message,
         }
 
@@ -212,6 +213,31 @@ class CompletionHookCase(unittest.TestCase):
         self.assertEqual(result["decision"], "block")
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["continuation_count"], 1)
+
+    def test_stop_hook_reentry_does_not_continue_or_mutate_progressed_active_run(
+        self,
+    ) -> None:
+        state_path = self.workspace_data() / "run_state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "run_id": "run-stop-reentry",
+                    "status": "executing",
+                    "remaining_units": 3,
+                    "waiting_for_user": False,
+                    "progress_marker": "chunk-1",
+                    "last_stop_marker": "",
+                    "continuation_count": 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = state_path.read_bytes()
+
+        result = self.run_completion(self.stop_payload(stop_hook_active=True))
+
+        self.assertEqual(result, {})
+        self.assertEqual(state_path.read_bytes(), before)
 
     def test_third_continuation_is_capped(self) -> None:
         state_path = self.workspace_data() / "run_state.json"
