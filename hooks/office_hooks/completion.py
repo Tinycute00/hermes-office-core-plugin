@@ -92,6 +92,9 @@ def handle_stop(payload: dict[str, Any], directory: Path) -> None:
 
 
 def handle_completion(payload: dict[str, Any]) -> None:
+    if str(payload.get("hook_event_name") or "") != "Stop":
+        emit({})
+        return
     directory = workspace_dir(
         str(payload.get("cwd") or os.getcwd()), create=False
     )
