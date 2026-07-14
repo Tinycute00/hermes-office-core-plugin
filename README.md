@@ -8,7 +8,7 @@ Office OS begins an Office turn with a compact intent classification. When a loc
 意圖：更新｜物件：Excel｜權限：固定輸出覆寫｜檢查：快速
 ```
 
-When the user has not supplied a local source, Office OS asks for the source before it inspects or alters Office data. To make that final question deterministic, the hook keeps only a private hash-keyed intake marker: it never stores the raw prompt, caps live markers at 128, expires them after one hour on the next intake or Stop, and consumes the matching marker at Stop. A newer source-free turn in the same session replaces the older marker, and Stop can consume the same-session marker when the host advances the turn id.
+When the user has not supplied a local source, Office OS asks for the source before it inspects or alters Office data. To make that final question deterministic, the hook keeps one private intake marker per session: it never stores the raw prompt, only separate SHA-256 hashes of session and session-plus-turn, the derived canonical reply, and creation time; it caps live markers at 128 globally, expires them after one hour on the next intake or Stop, and consumes the matching marker at Stop. Every later UserPromptSubmit in the same session clears an older marker before correction, non-Office, or named-source routing; a newer source-free turn in the same session replaces the older marker atomically. Stop can consume the same-session marker when the host advances the turn id, but only within that source-free response cycle.
 
 ## File support
 

@@ -20,7 +20,7 @@ The Office OS hook injects the authoritative plugin-data root into the workflow.
 
     PLUGIN_DATA/workspaces/<sha256(canonical-cwd)[:24]>/
 
-The hook keeps `PLUGIN_DATA/pending_intakes.json` outside workspace directories. It stores no raw prompt: only separate hashes of session and session-plus-turn, the derived canonical reply, and creation time. Retain at most 128 live intake markers, expire them after one hour on the next intake or Stop, and consume the matching marker at Stop. A newer source-free turn in the same session replaces the older marker; Stop can consume the same-session marker when the host advances the turn id. Remove the file when no markers remain. The root `run-state.lock` is one fixed lock file, not a per-turn record.
+The hook keeps `PLUGIN_DATA/pending_intakes.json` outside workspace directories. It stores no raw prompt: only separate SHA-256 hashes of session and session-plus-turn, the derived canonical reply, and creation time. Retain at most 128 live intake markers, expire them after one hour on the next intake or Stop, and consume the matching marker at Stop. Every later UserPromptSubmit in the same session clears an older marker before correction, non-Office, or named-source routing; a newer source-free turn in the same session replaces the older marker atomically. Stop can consume the same-session marker when the host advances the turn id, but only within that source-free response cycle. Remove the file when no markers remain. The root `run-state.lock` is one fixed lock file, not a per-turn record.
 
 Use these bounded artifacts:
 

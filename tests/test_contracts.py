@@ -175,10 +175,20 @@ class ContractCase(unittest.TestCase):
                 text,
             )
             self.assertIn("private intake marker", text)
+            self.assertIn("one private intake marker per session", text)
             self.assertIn("stores no raw prompt", text)
+            for disclosure in (
+                "SHA-256",
+                "session-plus-turn",
+                "derived canonical reply",
+                "creation time",
+            ):
+                self.assertIn(disclosure, text)
             self.assertIn("caps live markers at 128", text)
             self.assertIn("expires them after one hour", text)
             self.assertIn("consumes the matching marker at Stop", text)
+            self.assertIn("Every later UserPromptSubmit", text)
+            self.assertIn("clears an older marker", text)
             self.assertIn(
                 "a newer source-free turn in the same session replaces the older marker",
                 text,
@@ -187,6 +197,7 @@ class ContractCase(unittest.TestCase):
                 "Stop can consume the same-session marker when the host advances the turn id",
                 text,
             )
+            self.assertIn("only within that source-free response cycle", text)
             self.assertNotIn("Prefer the canonical envelope", text)
             self.assertNotIn("must equal the supplied skill-use announcement verbatim", text.lower())
 
@@ -196,8 +207,18 @@ class ContractCase(unittest.TestCase):
         self.assertIn("not supplied a local source", text)
         self.assertIn("before it inspects or alters Office data", text)
         self.assertIn("never stores the raw prompt", text)
+        self.assertIn("one private intake marker per session", text)
+        for disclosure in (
+            "SHA-256",
+            "session-plus-turn",
+            "derived canonical reply",
+            "creation time",
+        ):
+            self.assertIn(disclosure, text)
         self.assertIn("caps live markers at 128", text)
         self.assertIn("expires them after one hour", text)
+        self.assertIn("Every later UserPromptSubmit", text)
+        self.assertIn("clears an older marker", text)
         self.assertIn("newer source-free turn in the same session replaces", text)
         self.assertIn("same-session marker when the host advances the turn id", text)
 
@@ -286,8 +307,15 @@ class ContractCase(unittest.TestCase):
             "Retain at most 128 live intake markers",
             "expire them after one hour",
             "stores no raw prompt",
+            "SHA-256",
+            "session-plus-turn",
+            "derived canonical reply",
+            "creation time",
+            "Every later UserPromptSubmit",
+            "clears an older marker",
             "newer source-free turn in the same session replaces",
             "same-session marker when the host advances the turn id",
+            "only within that source-free response cycle",
         ):
             self.assertIn(marker, text)
         for stale in (

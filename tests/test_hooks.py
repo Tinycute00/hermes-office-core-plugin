@@ -435,6 +435,35 @@ class HookCase(unittest.TestCase):
         self.assertIsNone(self.run_hook(payload))
         self.assertFalse(self.plugin_data.exists())
 
+    def test_source_free_correction_prompt_discards_older_same_session_marker(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+                "session-correction",
+            )
+        )
+        correction = self.prompt_payload(
+            "The source-free Office intake final reply was not canonical. "
+            "Return exactly these two lines and nothing else:\n"
+            "意圖：排程｜物件：Excel｜權限：唯讀｜檢查：快速\n"
+            "Excel 來源檔或資料夾路徑是什麼？",
+            "turn-correction",
+            "session-correction",
+        )
+
+        self.assertIsNone(self.run_hook(correction))
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "session-correction",
+            "turn_id": "turn-correction",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": "修正回合已完成。",
+        }
+        self.assertEqual(self.run_hook(stop), {})
+
     def test_source_free_stop_uses_same_session_marker_when_turn_changes(self) -> None:
         self.run_hook(
             self.prompt_payload(
@@ -503,6 +532,73 @@ class HookCase(unittest.TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertIn("物件：Word", entries[0]["expected"])
+
+    def test_named_source_turn_discards_older_marker_for_same_session(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+            )
+        )
+        self.create_sources("budget.xlsx")
+
+        named = self.run_hook(
+            self.prompt_payload("檢查 budget.xlsx", "turn-named-source")
+        )
+
+        self.assertIsNotNone(named)
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-named-source",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": "具名來源回合已完成。",
+        }
+        self.assertEqual(self.run_hook(stop), {})
+
+    def test_non_office_turn_discards_older_marker_for_same_session(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+            )
+        )
+
+        self.assertIsNone(
+            self.run_hook(self.prompt_payload("今天午餐吃什麼？", "turn-non-office"))
+        )
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-non-office",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+            "last_assistant_message": "非 Office 回合已完成。",
+        }
+        self.assertEqual(self.run_hook(stop), {})
+
+    def test_other_session_prompt_does_not_discard_pending_marker(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "請用 $office-os 幫我每週更新 Excel 報表；先不要改檔案。",
+                "turn-source-free",
+                "session-owner",
+            )
+        )
+
+        self.assertIsNone(
+            self.run_hook(
+                self.prompt_payload(
+                    "今天午餐吃什麼？", "turn-other", "session-other"
+                )
+            )
+        )
+        entries = self.pending_intake_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertIn("物件：Excel", entries[0]["expected"])
 
     def test_source_free_stop_accepts_exact_pending_final_and_consumes_state(self) -> None:
         self.run_hook(
@@ -655,6 +751,55 @@ class HookCase(unittest.TestCase):
                 1,
             )
         )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_source_free_stop_rejects_hardlinked_pending_intake_before_read(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "每週更新 Excel 報表；先不要改檔案。", "turn-stop-hardlink-pending"
+            )
+        )
+        pending = self.plugin_data / "pending_intakes.json"
+        contents = pending.read_bytes()
+        pending.unlink()
+        sentinel = self.base / "outside-stop-pending-intakes.json"
+        sentinel.write_bytes(contents)
+        os.link(sentinel, pending)
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-stop-hardlink-pending",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+        }
+
+        self.assertIsNone(self.run_hook(stop, 1))
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_source_free_stop_rejects_linked_pending_intake_before_read(self) -> None:
+        self.run_hook(
+            self.prompt_payload(
+                "每週更新 Excel 報表；先不要改檔案。", "turn-stop-linked-pending"
+            )
+        )
+        pending = self.plugin_data / "pending_intakes.json"
+        pending.unlink()
+        outside = self.base / "outside-stop-pending-intakes"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        self.create_directory_link(pending, outside)
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "session-1",
+            "turn_id": "turn-stop-linked-pending",
+            "cwd": os.fspath(self.workspace),
+            "stop_hook_active": False,
+        }
+
+        self.assertIsNone(self.run_hook(stop, 1))
         self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
 
     def test_source_free_hook_rejects_hardlinked_root_lock_before_write(self) -> None:

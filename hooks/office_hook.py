@@ -534,6 +534,25 @@ def remember_pending_intake(payload: dict[str, Any], expected: str) -> None:
         write_json(path, {"entries": entries[-MAX_PENDING_INTAKES:]})
 
 
+def discard_pending_intake(payload: dict[str, Any]) -> None:
+    data_root = plugin_data_root()
+    validate_ordinary_ancestors(data_root, "plugin data root")
+    path = data_root / PENDING_INTAKES_NAME
+    if not os.path.lexists(data_root) or not os.path.lexists(path):
+        return
+    session_key, _ = pending_intake_keys(payload)
+    now = int(time.time())
+    with state_lock(data_root) as acquired:
+        if not acquired:
+            raise HookStateError("Office OS could not lock pending intake state.")
+        entries = live_pending_intakes(read_json(path, {"entries": []}), now)
+        remaining = [entry for entry in entries if entry["session_key"] != session_key]
+        if remaining:
+            write_json(path, {"entries": remaining})
+        else:
+            unlink_state_leaf(path, "Office OS pending intake", missing_ok=True)
+
+
 def consume_pending_intake(payload: dict[str, Any]) -> str | None:
     data_root = plugin_data_root()
     validate_ordinary_ancestors(data_root, "plugin data root")
@@ -659,8 +678,10 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
 def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
     if prompt.lstrip().startswith(STOP_CORRECTION_PREFIX):
+        discard_pending_intake(payload)
         return
     if not prompt or not is_office_prompt(prompt):
+        discard_pending_intake(payload)
         return
     cwd = str(payload.get("cwd") or os.getcwd())
     if not has_named_local_source(prompt, cwd):
@@ -672,6 +693,7 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
             )
         )
         return
+    discard_pending_intake(payload)
     directory = workspace_dir(cwd)
     if not remember_prompt(directory, payload, prompt):
         return
