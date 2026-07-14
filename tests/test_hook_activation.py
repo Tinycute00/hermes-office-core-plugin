@@ -108,6 +108,9 @@ class HookActivationCase(unittest.TestCase):
             "event_name": {
                 "SessionStart": "session_start",
                 "UserPromptSubmit": "user_prompt_submit",
+                "PreToolUse": "pre_tool_use",
+                "PermissionRequest": "permission_request",
+                "PostToolUse": "post_tool_use",
                 "Stop": "stop",
             }[event],
             "hooks": [normalized],
@@ -165,6 +168,9 @@ class HookActivationCase(unittest.TestCase):
         labels = {
             "SessionStart": "session_start",
             "UserPromptSubmit": "user_prompt_submit",
+            "PreToolUse": "pre_tool_use",
+            "PermissionRequest": "permission_request",
+            "PostToolUse": "post_tool_use",
             "Stop": "stop",
         }
         for event, label in labels.items():
@@ -173,7 +179,7 @@ class HookActivationCase(unittest.TestCase):
                     if "OFFICE_OS_MANAGED_HOOK=1" in handler["command"]:
                         key = f"{self.config.absolute()}:{label}:{group_index}:{handler_index}"
                         expected_states[key] = self.expected_hash(event, group, handler)
-        self.assertEqual(len(expected_states), 3)
+        self.assertEqual(len(expected_states), 6)
         self.assertEqual(
             {key for key in states if key != "unrelated"}, set(expected_states)
         )
@@ -183,7 +189,7 @@ class HookActivationCase(unittest.TestCase):
         activation_state = self.data_root / ".office-os-hook-activation.json"
         first_toml = self.codex_config.read_bytes()
         first_state = activation_state.read_bytes()
-        self.assertEqual(len(json.loads(first_state)["states"]), 3)
+        self.assertEqual(len(json.loads(first_state)["states"]), 6)
         second = self.run_registry(
             "install", activate=True, codex_config=self.codex_config
         )
