@@ -28,13 +28,19 @@ MAINTENANCE_ACTION_PATTERN = re.compile(
     r"\b(?:update|fix|modify|change|refactor|implement|repair)\b|修正|修改|修復",
     re.IGNORECASE,
 )
-REPOSITORY_ANCHOR_PATTERN = re.compile(
-    r"\b(?:repo(?:sitory)?|codebase|hooks?|scripts?|src)\b|專案|程式庫",
+GENERIC_REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:repo(?:sitory)?|codebase|project)\b|專案|程式庫",
     re.IGNORECASE,
 )
-IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
-    r"\b(?:implementation|parser|function|method|module|class|unit\s+tests?|"
-    r"integration\s+tests?|test\s+suite)\b|解析器|單元測試",
+STRUCTURAL_REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:hooks?|scripts?|src)\b", re.IGNORECASE
+)
+STRONG_IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:implementation|parser|function|method|module|class)\b|解析器",
+    re.IGNORECASE,
+)
+TEST_IMPLEMENTATION_ARTIFACT_PATTERN = re.compile(
+    r"\b(?:unit\s+tests?|integration\s+tests?|test\s+suite)\b|單元測試",
     re.IGNORECASE,
 )
 
@@ -49,10 +55,14 @@ def require_prompt_identity(payload: dict[str, Any]) -> None:
 
 
 def is_repository_maintenance_prompt(prompt: str) -> bool:
+    if not MAINTENANCE_ACTION_PATTERN.search(prompt):
+        return False
+    has_strong_artifact = bool(STRONG_IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt))
     return bool(
-        MAINTENANCE_ACTION_PATTERN.search(prompt)
-        and REPOSITORY_ANCHOR_PATTERN.search(prompt)
-        and IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt)
+        has_strong_artifact and GENERIC_REPOSITORY_ANCHOR_PATTERN.search(prompt)
+    ) or bool(
+        STRUCTURAL_REPOSITORY_ANCHOR_PATTERN.search(prompt)
+        and (has_strong_artifact or TEST_IMPLEMENTATION_ARTIFACT_PATTERN.search(prompt))
     )
 
 

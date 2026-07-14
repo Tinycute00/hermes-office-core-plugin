@@ -192,6 +192,17 @@ class IntakeRouterCase(unittest.TestCase):
         )
         self.assertTrue((self.plugin_data / "pending_intakes.json").is_file())
 
+    def test_office_workbook_tracking_project_tests_remains_source_free(self) -> None:
+        result = self.run_hook(
+            self.prompt_payload("Update an Excel workbook to track project unit tests")
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIn(
+            "<office-os-source-free-intake>", result["hookSpecificOutput"]["additionalContext"]
+        )
+        self.assertTrue((self.plugin_data / "pending_intakes.json").is_file())
+
     def test_chinese_office_prompt_remains_source_free_intake(self) -> None:
         result = self.run_hook(self.prompt_payload("檢查 Excel 工作簿"))
 
