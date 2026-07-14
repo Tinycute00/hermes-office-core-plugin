@@ -4,13 +4,20 @@ import argparse
 import json
 import os
 from pathlib import Path
-import stat
 import sys
 from typing import Any
 
+from office_hook_activation import (
+    EVENTS,
+    MANAGED_MARKER,
+    activate_install,
+    activate_uninstall,
+    is_managed_group,
+    validate_activation_paths,
+)
+from office_hook_toml import TomlError, atomic_write, require_regular_file
 
-MANAGED_MARKER = "OFFICE_OS_MANAGED_HOOK=1"
-EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
+
 STATUS_MESSAGES = {
     "SessionStart": "載入 Office OS",
     "UserPromptSubmit": "辨識辦公室需求",
@@ -26,23 +33,13 @@ def absolute(path: str, description: str) -> Path:
     candidate = Path(path)
     if not candidate.is_absolute():
         raise RegistryError(f"{description} must be absolute: {candidate}")
-    return candidate.resolve(strict=False)
+    return candidate.absolute()
 
 
 def require_plugin_root(path: Path) -> None:
     for relative in (Path("hooks") / "office_hook.py", Path("hooks") / "run-python.ps1"):
         if not (path / relative).is_file():
             raise RegistryError(f"plugin root is missing {relative}: {path}")
-
-
-def require_regular_file(path: Path, description: str) -> None:
-    if not path.exists():
-        return
-    details = path.lstat()
-    if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
-        raise RegistryError(f"{description} must be a regular file: {path}")
-    if details.st_nlink != 1:
-        raise RegistryError(f"{description} must not be hard-linked: {path}")
 
 
 def read_config(path: Path) -> dict[str, Any]:
@@ -106,24 +103,6 @@ def managed_group(plugin_root: Path, data_root: Path, event: str) -> dict[str, A
     return group
 
 
-def is_managed_group(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    handlers = value.get("hooks")
-    if not isinstance(handlers, list):
-        return False
-    for handler in handlers:
-        if not isinstance(handler, dict):
-            continue
-        command = handler.get("command")
-        command_windows = handler.get("commandWindows")
-        if isinstance(command, str) and MANAGED_MARKER in command:
-            return True
-        if isinstance(command_windows, str) and "OFFICE_OS_MANAGED_HOOK=1" in command_windows:
-            return True
-    return False
-
-
 def hook_groups(config: dict[str, Any]) -> dict[str, Any]:
     value = config.get("hooks")
     if value is None:
@@ -167,17 +146,11 @@ def uninstall(config: dict[str, Any]) -> None:
 
 
 def write_config(path: Path, config: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.office-os-{os.getpid()}.tmp")
-    try:
-        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-            json.dump(config, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temporary, path)
-    except OSError:
-        if temporary.exists():
-            temporary.unlink()
-        raise
+    atomic_write(
+        path,
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        "hook config",
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -186,27 +159,49 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     install_parser = subparsers.add_parser("install")
     install_parser.add_argument("--plugin-root", required=True)
     install_parser.add_argument("--data-root")
-    for candidate in (install_parser, subparsers.add_parser("uninstall")):
+    uninstall_parser = subparsers.add_parser("uninstall")
+    uninstall_parser.add_argument("--data-root")
+    for candidate in (install_parser, uninstall_parser):
         candidate.add_argument("--config")
+        candidate.add_argument("--activate", action="store_true")
+        candidate.add_argument("--codex-config")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    config_path = absolute(
-        args.config or os.fspath(Path.home() / ".codex" / "hooks.json"), "hook config"
-    )
     try:
-        config = read_config(config_path)
+        args = parse_args(argv)
+        config_path = absolute(
+            args.config or os.fspath(Path.home() / ".codex" / "hooks.json"), "hook config"
+        )
+        data_root = absolute(
+            args.data_root
+            or os.fspath(Path.home() / ".codex" / "plugin-data" / "office-os"),
+            "plugin data root",
+        )
+        if args.activate:
+            codex_config = absolute(
+                args.codex_config or os.fspath(Path.home() / ".codex" / "config.toml"),
+                "Codex config",
+            )
+        else:
+            codex_config = None
         if args.action == "install":
             plugin_root = absolute(args.plugin_root, "plugin root")
-            data_root = absolute(
-                args.data_root
-                or os.fspath(Path.home() / ".codex" / "plugin-data" / "office-os"),
-                "plugin data root",
-            )
             require_plugin_root(plugin_root)
+        if args.activate:
+            validate_activation_paths(
+                codex_config, data_root, installing=args.action == "install"
+            )
+        config = read_config(config_path)
+        if args.action == "install":
             install(config, plugin_root, data_root)
+            write_config(config_path, config)
+            activation_changed = (
+                activate_install(config, config_path, codex_config, data_root)
+                if args.activate
+                else False
+            )
             result = {
                 "action": "installed",
                 "config": os.fspath(config_path),
@@ -214,9 +209,27 @@ def main(argv: list[str]) -> int:
             }
         else:
             uninstall(config)
+            write_config(config_path, config)
+            activation_changed = (
+                activate_uninstall(config_path, codex_config, data_root)
+                if args.activate
+                else False
+            )
             result = {"action": "uninstalled", "config": os.fspath(config_path)}
-        write_config(config_path, config)
-    except (OSError, RegistryError) as error:
+        result.update(
+            {
+                "activation": (
+                    "activated"
+                    if args.action == "install" and args.activate
+                    else "deactivated"
+                    if args.action == "uninstall" and args.activate
+                    else "not_requested"
+                ),
+                "activated": args.action == "install" and args.activate,
+                "activationChanged": activation_changed,
+            }
+        )
+    except (OSError, RegistryError, TomlError) as error:
         print(f"Office OS hook registry: {error}", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
