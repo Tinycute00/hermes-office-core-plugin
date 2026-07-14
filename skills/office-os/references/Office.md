@@ -35,6 +35,8 @@ Use these bounded artifacts:
 
 Retain at most 256 ordinary workspace-state directories; evict inactive entries deterministically, never an active/running state, and do not traverse reparse points.
 
+Hook diagnostics retain one private, replace-only `PLUGIN_DATA/latest_hook_diagnostic.json`, not a journal. A recognized controlled failure may atomically replace it; it expires after 24 hours and is removed on the next hook or doctor cleanup. It stores only bounded identifiers and never raw prompt, Office content, credential, absolute path, command, tool response, PID, user name, stdout/stderr, or history. Refuse linked, reparse, or hard-linked diagnostic leaves.
+
 Do not create timestamped logs, per-run directories, or unbounded event streams. Temporary extraction and rendering files belong under a run-scoped temporary directory and are removed on completion or next startup cleanup.
 
 ## Discovery and file classes

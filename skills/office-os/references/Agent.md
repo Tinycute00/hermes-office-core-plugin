@@ -80,6 +80,8 @@ Preserve the source's language, terminology, number formats, date formats, theme
 
 Keep the previous published output when validation or replacement fails. Explain what failed, which source and previous output remain intact, and the smallest next action.
 
+Use nontechnical, recovery-oriented language. Do not expose diagnostic codes or ask a normal user to debug; ask at most one short owner question only when an owner decision is needed to continue safely.
+
 Stop autonomous continuation when progress cannot be demonstrated, an owner decision is pending, two automatic continuations have been used, or the task is complete. Never turn a Stop hook into an unbounded loop.
 
 ## Completion report

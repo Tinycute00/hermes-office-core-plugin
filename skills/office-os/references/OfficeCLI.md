@@ -16,6 +16,8 @@ The manager selects OfficeCLI `1.0.135` at source commit `d2d9c60f44537004c3e1f4
 
 ## Authority boundary
 
+Hooks are advisory context and recovery helpers, not hard enforcement. They may recognize the Office route but must not duplicate the adapter grammar, candidate containment, Core confirmation, publishing, runtime verification, or ordinary Codex approval. The local adapter and Office OS Core retain those authorities; PermissionRequest never grants approval. Keep this boundary while using the fallback below.
+
 The adapter exposes exactly one tool, `officecli`, with one required input: `command: string[]` containing 1 to 128 tokens. Never send a shell command, an alternate argument field, or an extra tool parameter.
 
 Its sole staging root is `PLUGIN_DATA/officecli-candidates`, derived internally. Each successful `office_os.py begin` reserves and returns one run-specific `candidate_directory` below that root. A manual fixed-output run remains `awaiting_confirmation` until the owner explicitly approves the compact task agreement through `office_os.py confirm`; before that transition, do not copy a source, create a candidate, call the adapter, record progress, or publish. Before a tool call after confirmation:
