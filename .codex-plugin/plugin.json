@@ -11,11 +11,6 @@
   "license": "MIT",
   "keywords": ["office", "excel", "word", "powerpoint", "pdf", "workflow"],
   "skills": "./skills/",
-  "hooks": [
-    "./hooks/session-start-office-os.json",
-    "./hooks/user-prompt-submit-office-os.json",
-    "./hooks/stop-office-os.json"
-  ],
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Office OS",
