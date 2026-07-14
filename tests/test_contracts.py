@@ -91,6 +91,8 @@ class ContractCase(unittest.TestCase):
             "PowerPoint.md",
             "PDF.md",
             "OfficeCLI.md",
+            "Hooks.md",
+            "Debugging.md",
         }
         actual = {
             path.name

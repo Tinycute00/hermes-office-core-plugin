@@ -27,7 +27,7 @@ For a prompt without a named local source path or folder, the source-free intake
 
 Classify only the current prompt. Reclassify every new turn; never carry edit permission from a prior turn. Treat explicit $office-os as invocation, not as write authorization.
 
-Read [Agent.md](references/Agent.md) and [Workflow.md](references/Workflow.md) before substantive work. Then read only the matching object reference. Read [Office.md](references/Office.md) for lookup, indexing, confidential-data handling, cross-file work, or scheduling. Read [OfficeCLI.md](references/OfficeCLI.md) for writable Office work or rendered QA.
+Read [Agent.md](references/Agent.md) and [Workflow.md](references/Workflow.md) before substantive work. Then read only the matching object reference. Read [Office.md](references/Office.md) for lookup, indexing, confidential-data handling, cross-file work, or scheduling. Read [OfficeCLI.md](references/OfficeCLI.md) for writable Office work or rendered QA. Read [Hooks.md](references/Hooks.md) only for hook boundaries and [Debugging.md](references/Debugging.md) only after an Office error; use its doctor/recovery route without turning normal Office work into debugging.
 
 ## 2. Ground and agree
 
