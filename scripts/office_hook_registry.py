@@ -8,21 +8,19 @@ import sys
 from typing import Any
 
 from office_hook_activation import (
-    EVENTS,
     MANAGED_MARKER,
     activate_install,
     activate_uninstall,
     is_managed_group,
+    is_managed_handler,
     validate_activation_paths,
 )
 from office_hook_toml import TomlError, atomic_write, require_regular_file
+HOOKS_DIRECTORY = Path(__file__).resolve().parents[1] / "hooks"
+if os.fspath(HOOKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, os.fspath(HOOKS_DIRECTORY))
 
-
-STATUS_MESSAGES = {
-    "SessionStart": "載入 Office OS",
-    "UserPromptSubmit": "辨識辦公室需求",
-    "Stop": "確認 Office OS 進度",
-}
+from office_hook_spec import HOOK_DEFINITIONS, HookDefinition
 
 
 class RegistryError(RuntimeError):
@@ -37,7 +35,10 @@ def absolute(path: str, description: str) -> Path:
 
 
 def require_plugin_root(path: Path) -> None:
-    for relative in (Path("hooks") / "office_hook.py", Path("hooks") / "run-python.ps1"):
+    for relative in (
+        Path("hooks") / "office_hook_spec.py",
+        Path("hooks") / "run-python.ps1",
+    ):
         if not (path / relative).is_file():
             raise RegistryError(f"plugin root is missing {relative}: {path}")
 
@@ -59,8 +60,10 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
-def commands(plugin_root: Path, data_root: Path) -> tuple[str, str]:
-    hook = plugin_root / "hooks" / "office_hook.py"
+def commands(
+    plugin_root: Path, data_root: Path, definition: HookDefinition
+) -> tuple[str, str]:
+    hook = plugin_root / "hooks" / definition.entrypoint
     bootstrap = plugin_root / "hooks" / "run-python.ps1"
     posix = (
         f"{MANAGED_MARKER} PLUGIN_ROOT={shell_quote(os.fspath(plugin_root))} "
@@ -78,21 +81,23 @@ def commands(plugin_root: Path, data_root: Path) -> tuple[str, str]:
     return posix, windows
 
 
-def managed_group(plugin_root: Path, data_root: Path, event: str) -> dict[str, Any]:
-    command, command_windows = commands(plugin_root, data_root)
+def managed_group(
+    plugin_root: Path, data_root: Path, definition: HookDefinition
+) -> dict[str, Any]:
+    command, command_windows = commands(plugin_root, data_root, definition)
     group: dict[str, Any] = {
         "hooks": [
             {
                 "type": "command",
                 "command": command,
                 "commandWindows": command_windows,
-                "timeout": 10,
-                "statusMessage": STATUS_MESSAGES[event],
+                "timeout": definition.timeout_seconds,
+                "statusMessage": definition.status_message,
             }
         ]
     }
-    if event == "SessionStart":
-        group["matcher"] = "startup|resume|clear|compact"
+    if definition.matcher is not None:
+        group["matcher"] = definition.matcher
     return group
 
 
@@ -107,14 +112,31 @@ def hook_groups(config: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def without_managed_handlers(groups: list[Any]) -> list[Any]:
+    remaining_groups: list[Any] = []
+    for group in groups:
+        if not is_managed_group(group):
+            remaining_groups.append(group)
+            continue
+        remaining_handlers = [
+            handler for handler in group["hooks"] if not is_managed_handler(handler)
+        ]
+        if remaining_handlers:
+            remaining_group = dict(group)
+            remaining_group["hooks"] = remaining_handlers
+            remaining_groups.append(remaining_group)
+    return remaining_groups
+
+
 def install(config: dict[str, Any], plugin_root: Path, data_root: Path) -> None:
     groups = hook_groups(config)
-    for event in EVENTS:
+    for definition in HOOK_DEFINITIONS:
+        event = definition.event_name
         existing = groups.get(event, [])
         if not isinstance(existing, list):
             raise RegistryError(f"hook config event must be an array: {event}")
-        groups[event] = [group for group in existing if not is_managed_group(group)]
-        groups[event].append(managed_group(plugin_root, data_root, event))
+        groups[event] = without_managed_handlers(existing)
+        groups[event].append(managed_group(plugin_root, data_root, definition))
 
 
 def uninstall(config: dict[str, Any]) -> None:
@@ -123,13 +145,10 @@ def uninstall(config: dict[str, Any]) -> None:
         return
     if not isinstance(groups, dict):
         raise RegistryError("hook config field 'hooks' must be a JSON object")
-    for event in EVENTS:
-        existing = groups.get(event)
-        if existing is None:
-            continue
+    for event, existing in list(groups.items()):
         if not isinstance(existing, list):
             raise RegistryError(f"hook config event must be an array: {event}")
-        remaining = [group for group in existing if not is_managed_group(group)]
+        remaining = without_managed_handlers(existing)
         if remaining:
             groups[event] = remaining
         else:

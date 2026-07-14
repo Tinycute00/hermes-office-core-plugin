@@ -2,16 +2,16 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/session_context_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\session_context_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
             "timeout": 10,
             "statusMessage": "載入 Office OS"
           }
-        ]
+        ],
+        "matcher": "startup|resume|clear|compact"
       }
     ],
     "UserPromptSubmit": [
@@ -19,12 +19,54 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/intake_router_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\intake_router_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
             "timeout": 10,
             "statusMessage": "辨識辦公室需求"
           }
         ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/tool_guard_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\tool_guard_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
+            "timeout": 10,
+            "statusMessage": "檢查 Office 工具"
+          }
+        ],
+        "matcher": "^(Bash|mcp__officecli__officecli)$"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/tool_guard_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\tool_guard_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
+            "timeout": 10,
+            "statusMessage": "確認 Office 權限"
+          }
+        ],
+        "matcher": "^(Bash|mcp__officecli__officecli)$"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/tool_outcome_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\tool_outcome_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
+            "timeout": 10,
+            "statusMessage": "整理 Office 工具結果"
+          }
+        ],
+        "matcher": "^(Bash|mcp__officecli__officecli)$"
       }
     ],
     "Stop": [
@@ -32,8 +74,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/hooks/office_hook.py\"",
-            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"& \\\"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\\\" \\\"$env:PLUGIN_ROOT\\hooks\\office_hook.py\\\"\"",
+            "command": "PLUGIN_ROOT=\"${PLUGIN_ROOT}\" PLUGIN_DATA=\"${PLUGIN_DATA}\" python3 \"${PLUGIN_ROOT}/hooks/completion_hook.py\"",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$env:PLUGIN_ROOT\\hooks\\run-python.ps1\" -ScriptPath \"$env:PLUGIN_ROOT\\hooks\\completion_hook.py\" -PluginRoot \"$env:PLUGIN_ROOT\" -PluginData \"$env:PLUGIN_DATA\"",
             "timeout": 10,
             "statusMessage": "確認 Office OS 進度"
           }

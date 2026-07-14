@@ -11,6 +11,31 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RENDERER = ROOT / "scripts" / "render_office_hooks.py"
+HOOK_CONTRACT = {
+    "SessionStart": (
+        "startup|resume|clear|compact",
+        "session_context_hook.py",
+        "載入 Office OS",
+    ),
+    "UserPromptSubmit": (None, "intake_router_hook.py", "辨識辦公室需求"),
+    "PreToolUse": (
+        "^(Bash|mcp__officecli__officecli)$",
+        "tool_guard_hook.py",
+        "檢查 Office 工具",
+    ),
+    "PermissionRequest": (
+        "^(Bash|mcp__officecli__officecli)$",
+        "tool_guard_hook.py",
+        "確認 Office 權限",
+    ),
+    "PostToolUse": (
+        "^(Bash|mcp__officecli__officecli)$",
+        "tool_outcome_hook.py",
+        "整理 Office 工具結果",
+    ),
+    "Stop": (None, "completion_hook.py", "確認 Office OS 進度"),
+}
 
 
 class ContractCase(unittest.TestCase):
@@ -19,11 +44,12 @@ class ContractCase(unittest.TestCase):
             (ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
         )
         self.assertEqual(manifest["name"], "office-os")
-        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertEqual(manifest["version"], "0.3.0")
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
-        self.assertNotIn("hooks", manifest)
+        self.assertEqual(manifest["hooks"], "./hooks/hooks.json")
         self.assertTrue((ROOT / "hooks" / "hooks.json").is_file())
+        self.assertTrue(RENDERER.is_file())
         self.assertTrue((ROOT / "scripts" / "office_hook_registry.py").is_file())
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("office_hook_registry.py install", readme)
@@ -363,23 +389,71 @@ class ContractCase(unittest.TestCase):
         ):
             self.assertNotIn(stale, combined)
 
-    def test_hooks_cover_only_detection_restore_and_bounded_continuation(self) -> None:
+    def test_generated_hooks_cover_the_six_event_contract(self) -> None:
         hooks = json.loads(
             (ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8")
         )["hooks"]
-        self.assertEqual(set(hooks), {"SessionStart", "UserPromptSubmit", "Stop"})
-        self.assertEqual(
-            hooks["SessionStart"][0]["matcher"],
-            "startup|resume|clear|compact",
+        self.assertEqual(set(hooks), set(HOOK_CONTRACT))
+        for event, (matcher, entrypoint, status_message) in HOOK_CONTRACT.items():
+            groups = hooks[event]
+            self.assertEqual(len(groups), 1)
+            group = groups[0]
+            if matcher is None:
+                self.assertNotIn("matcher", group)
+            else:
+                self.assertEqual(group["matcher"], matcher)
+            handlers = group["hooks"]
+            self.assertEqual(len(handlers), 1)
+            handler = handlers[0]
+            self.assertEqual(handler["type"], "command")
+            self.assertEqual(handler["timeout"], 10)
+            self.assertEqual(handler["statusMessage"], status_message)
+            self.assertIn("${PLUGIN_ROOT}", handler["command"])
+            self.assertIn("${PLUGIN_DATA}", handler["command"])
+            self.assertIn(entrypoint, handler["command"])
+            self.assertIn("commandWindows", handler)
+            self.assertIn("$env:PLUGIN_ROOT", handler["commandWindows"])
+            self.assertIn("$env:PLUGIN_DATA", handler["commandWindows"])
+            self.assertIn(entrypoint, handler["commandWindows"])
+            self.assertIn("-File", handler["commandWindows"])
+            self.assertNotIn("-Command", handler["commandWindows"])
+            self.assertNotIn("OFFICE_OS_MANAGED_HOOK=1", handler["command"])
+            self.assertNotIn("OFFICE_OS_MANAGED_HOOK=1", handler["commandWindows"])
+
+    def run_renderer(
+        self, *arguments: str, expected_returncode: int = 0
+    ) -> subprocess.CompletedProcess[str]:
+        completed = subprocess.run(
+            [sys.executable, os.fspath(RENDERER), *arguments],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
         )
-        self.assertNotIn("matcher", hooks["UserPromptSubmit"][0])
-        self.assertNotIn("matcher", hooks["Stop"][0])
-        for groups in hooks.values():
-            for group in groups:
-                for handler in group["hooks"]:
-                    self.assertEqual(handler["type"], "command")
-                    self.assertIn("commandWindows", handler)
-                    self.assertLessEqual(handler["timeout"], 10)
+        self.assertEqual(
+            completed.returncode,
+            expected_returncode,
+            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        return completed
+
+    def test_hook_renderer_rejects_hand_edited_static_config(self) -> None:
+        bundled = ROOT / "hooks" / "hooks.json"
+        self.run_renderer("--check")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "hooks.json"
+            self.run_renderer("--output", os.fspath(output))
+            self.assertEqual(output.read_bytes(), bundled.read_bytes())
+            stale = json.loads(output.read_text(encoding="utf-8"))
+            stale["hooks"]["PostToolUse"][0]["hooks"][0]["statusMessage"] = "stale"
+            output.write_text(
+                json.dumps(stale, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            completed = self.run_renderer(
+                "--check", "--output", os.fspath(output), expected_returncode=1
+            )
+        self.assertIn("stale", completed.stderr)
 
     def test_hook_refuses_writable_work_without_plugin_data(self) -> None:
         environment = os.environ.copy()

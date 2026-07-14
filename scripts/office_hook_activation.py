@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import sys
 from typing import Any
 
 from office_hook_toml import (
@@ -17,17 +19,22 @@ from office_hook_toml import (
 
 
 MANAGED_MARKER = "OFFICE_OS_MANAGED_HOOK=1"
-EVENTS = ("SessionStart", "UserPromptSubmit", "Stop")
-EVENT_LABELS = {
-    "SessionStart": "session_start",
-    "UserPromptSubmit": "user_prompt_submit",
-    "Stop": "stop",
-}
+HOOKS_DIRECTORY = Path(__file__).resolve().parents[1] / "hooks"
+if os.fspath(HOOKS_DIRECTORY) not in sys.path:
+    sys.path.insert(0, os.fspath(HOOKS_DIRECTORY))
+
+from office_hook_spec import HOOK_DEFINITIONS
+
+
 ACTIVATION_STATE_NAME = ".office-os-hook-activation.json"
 
 
 class ActivationError(TomlError):
     pass
+
+
+def event_label(event: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", event).lower()
 
 
 def is_managed_handler(value: Any) -> bool:
@@ -63,7 +70,7 @@ def _trusted_hash(event: str, group: dict[str, Any], handler: dict[str, Any]) ->
     if "statusMessage" in handler:
         normalized["statusMessage"] = handler["statusMessage"]
     identity: dict[str, Any] = {
-        "event_name": EVENT_LABELS[event],
+        "event_name": event_label(event),
         "hooks": [normalized],
     }
     if isinstance(group.get("matcher"), str):
@@ -81,7 +88,8 @@ def managed_trust_states(config: dict[str, Any], hooks_config: Path) -> dict[str
     if not isinstance(groups, dict):
         raise ActivationError("hook config field 'hooks' must be a JSON object")
     states: dict[str, str] = {}
-    for event in EVENTS:
+    for definition in HOOK_DEFINITIONS:
+        event = definition.event_name
         existing = groups.get(event, [])
         if not isinstance(existing, list):
             raise ActivationError(f"hook config event must be an array: {event}")
@@ -96,7 +104,7 @@ def managed_trust_states(config: dict[str, Any], hooks_config: Path) -> dict[str
                 if not isinstance(handler, dict):
                     raise ActivationError(f"managed hook handler must be an object: {event}")
                 key = (
-                    f"{os.fspath(hooks_config)}:{EVENT_LABELS[event]}:"
+                    f"{os.fspath(hooks_config)}:{event_label(event)}:"
                     f"{group_index}:{handler_index}"
                 )
                 states[key] = _trusted_hash(event, group, handler)
