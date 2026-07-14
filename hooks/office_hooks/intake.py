@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 from office_hooks.intent import (
@@ -23,6 +24,15 @@ from office_hooks.storage import read_json, write_json
 
 
 MAX_DEDUP_KEYS = 128
+REPOSITORY_ANCHOR_PATTERN = re.compile(
+    r"\b(?:repo(?:sitory)?|codebase|source\s+code|hooks?|scripts?|src|tests?)\b",
+    re.IGNORECASE,
+)
+IMPLEMENTATION_TERM_PATTERN = re.compile(
+    r"\b(?:implementation|parser|function|method|module|class|unit\s+test|"
+    r"integration\s+test|test\s+suite)\b",
+    re.IGNORECASE,
+)
 
 
 def require_prompt_identity(payload: dict[str, Any]) -> None:
@@ -32,6 +42,14 @@ def require_prompt_identity(payload: dict[str, Any]) -> None:
             raise HookStateError(
                 "Office OS intake requires non-empty session_id and turn_id values."
             )
+
+
+def is_repository_maintenance_prompt(prompt: str) -> bool:
+    cleaned = strip_code(prompt)
+    return bool(
+        REPOSITORY_ANCHOR_PATTERN.search(cleaned)
+        and IMPLEMENTATION_TERM_PATTERN.search(cleaned)
+    )
 
 
 def prompt_reference(prompt: str) -> tuple[str, ...]:
@@ -73,7 +91,10 @@ def handle_user_prompt(payload: dict[str, Any]) -> None:
         require_prompt_identity(payload)
         discard_pending_intake(payload)
         return
-    if not prompt or not is_office_prompt(prompt):
+    if not prompt or is_repository_maintenance_prompt(prompt) or not is_office_prompt(prompt):
+        if not os.environ.get("PLUGIN_DATA"):
+            emit({})
+            return
         discard_pending_intake(payload)
         return
     plugin_data_root()

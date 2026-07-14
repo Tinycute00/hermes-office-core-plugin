@@ -155,6 +155,67 @@ class IntakeRouterCase(unittest.TestCase):
         )
         self.assertFalse(self.plugin_data.exists())
 
+    def test_repository_maintenance_with_office_words_does_not_create_state(self) -> None:
+        prompts = (
+            "Update the Excel workbook parser in hooks",
+            "修正 hooks 裡 Excel 工作簿 parser 的測試",
+        )
+
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(self.run_hook(self.prompt_payload(prompt)))
+                self.assertFalse(self.plugin_data.exists())
+
+    def test_chinese_office_prompt_remains_source_free_intake(self) -> None:
+        result = self.run_hook(self.prompt_payload("檢查 Excel 工作簿"))
+
+        self.assertIsNotNone(result)
+        self.assertIn(
+            "<office-os-source-free-intake>", result["hookSpecificOutput"]["additionalContext"]
+        )
+
+    def test_office_prompt_with_unpaired_implementation_word_remains_source_free(self) -> None:
+        result = self.run_hook(self.prompt_payload("Check the Excel workbook parser"))
+
+        self.assertIsNotNone(result)
+        self.assertIn(
+            "<office-os-source-free-intake>", result["hookSpecificOutput"]["additionalContext"]
+        )
+
+    def test_repository_maintenance_discards_existing_session_pending_intake(self) -> None:
+        prompts = (
+            "Update the Excel workbook parser in hooks",
+            "修正 hooks 裡 Excel 工作簿 parser 的測試",
+        )
+
+        for number, prompt in enumerate(prompts):
+            session_id = f"shared-{number}"
+            with self.subTest(prompt=prompt):
+                self.run_hook(
+                    self.prompt_payload("Schedule an Excel spreadsheet", session_id=session_id)
+                )
+                self.assertIsNone(
+                    self.run_hook(
+                        self.prompt_payload(prompt, "turn-maintenance", session_id)
+                    )
+                )
+                self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+                self.assertFalse((self.plugin_data / "workspaces").exists())
+
+    def test_unrelated_prompts_without_plugin_data_emit_empty_output(self) -> None:
+        fence = chr(96) * 3
+        prompts = (
+            "What is the capital of France?",
+            f"{fence}\nUpdate an Excel workbook\n{fence}",
+            "Update the Excel workbook parser in hooks",
+        )
+
+        for prompt in prompts:
+            self.assertEqual(
+                self.run_hook(self.prompt_payload(prompt), with_plugin_data=False), {}
+            )
+        self.assertFalse(self.plugin_data.exists())
+
     def test_same_session_source_free_marker_replaces_then_named_source_discards(self) -> None:
         self.run_hook(
             self.prompt_payload(
