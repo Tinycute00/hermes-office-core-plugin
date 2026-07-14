@@ -12,6 +12,9 @@ MCP_TOOL_NAME: Final = "mcp__officecli__officecli"
 PRE_TOOL_USE: Final = "PreToolUse"
 PERMISSION_REQUEST: Final = "PermissionRequest"
 MUTATION_VERBS: Final = frozenset({"set", "add", "remove", "move", "swap"})
+COMMAND_FAMILIES: Final = frozenset(
+    {"validate", "get", "query", "view", *MUTATION_VERBS}
+)
 SIMPLE_BASH_COMMAND: Final = re.compile(
     r"""^\s*(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?\s+
     (?P<script>"[^"\r\n]+"|'[^'\r\n]+'|[^\s"'`$|&;<>()]+)
@@ -46,6 +49,10 @@ def valid_mcp_command(tool_input: Any) -> tuple[str, ...] | None:
     if not isinstance(command, list) or not 1 <= len(command) <= 128:
         return None
     if not all(isinstance(item, str) for item in command):
+        return None
+    if command[0] not in COMMAND_FAMILIES:
+        return None
+    if command[0] == "validate" and len(command) != 2:
         return None
     return tuple(command)
 

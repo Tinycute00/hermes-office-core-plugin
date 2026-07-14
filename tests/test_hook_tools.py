@@ -107,7 +107,7 @@ class ToolGuardCase(unittest.TestCase):
         result = self.run_guard(
             self.pretool(
                 "mcp__officecli__officecli",
-                {"command": ["validate", "candidate.xlsx", sentinel]},
+                {"command": ["validate", f"{sentinel}.xlsx"]},
             ),
             plugin_data=self.plugin_data,
         )
@@ -143,6 +143,8 @@ class ToolGuardCase(unittest.TestCase):
         malformed_inputs = (
             {"command": "not-an-array"},
             {"command": ["validate", 1]},
+            {"command": ["validate", "candidate.xlsx", "extra"]},
+            {"command": ["raw", "candidate.xlsx"]},
             {"command": ["validate"] * 129},
             {"command": ["validate", "candidate.xlsx"], "raw": True},
         )
@@ -221,6 +223,51 @@ class ToolGuardCase(unittest.TestCase):
         )
         self.assertEqual(unrelated, {})
         self.assert_no_state()
+
+    def test_permission_request_invalid_office_calls_never_allow_or_create_state(
+        self,
+    ) -> None:
+        source = self.workspace / "source.xlsx"
+        source.write_text("source", encoding="utf-8")
+        requests = (
+            (
+                self.permission(
+                    "mcp__officecli__officecli",
+                    {"command": ["validate", "candidate.xlsx", "extra"]},
+                ),
+                self.plugin_data,
+            ),
+            (
+                self.permission(
+                    "mcp__officecli__officecli",
+                    {"command": ["validate", "candidate.xlsx"]},
+                ),
+                None,
+            ),
+            (
+                self.permission(
+                    "mcp__officecli__officecli",
+                    {
+                        "command": [
+                            "set",
+                            os.fspath(source),
+                            "slide[0]",
+                            "--prop",
+                            "text=updated",
+                        ]
+                    },
+                ),
+                self.plugin_data,
+            ),
+        )
+
+        for payload, plugin_data in requests:
+            with self.subTest(payload=payload):
+                result = self.run_guard(payload, plugin_data=plugin_data)
+                output = result.get("hookSpecificOutput", {})
+                self.assertNotEqual(output.get("permissionDecision"), "allow")
+                self.assertEqual(result, {})
+                self.assert_no_state()
 
 
 if __name__ == "__main__":
