@@ -77,7 +77,7 @@ QUOTED_OFFICE_FILENAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 QUOTED_LOCAL_PATH_PATTERN = re.compile(
-    r'"(?P<double>(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^\\"\r\n]+)"'
+    r'"(?P<double>(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^"\r\n]+)"'
     r"|'(?P<single>(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\\\\[^\\/\s]+[\\/]|/(?!/))[^'\r\n]+)'"
 )
 

@@ -14,6 +14,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "office_hook.py"
+sys.path.insert(0, os.fspath(ROOT / "hooks"))
+
+from office_hooks.intent import QUOTED_LOCAL_PATH_PATTERN
 
 
 class PendingIntakeEntry(TypedDict):
@@ -156,6 +159,24 @@ class HookCase(unittest.TestCase):
             "no visible preamble, plan, skill announcement, tool-activity summary, or separate progress message",
         ):
             self.assertIn(marker, context)
+
+    def test_quoted_nested_windows_source_routes_to_named_intake(self) -> None:
+        source = self.workspace / "nested" / "reports" / "budget.xlsx"
+        source.parent.mkdir(parents=True)
+        source.touch()
+        prompt = f'Review "{os.fspath(source)}"'
+
+        matches = list(QUOTED_LOCAL_PATH_PATTERN.finditer(prompt))
+        self.assertEqual([match.group("double") for match in matches], [os.fspath(source)])
+
+        result = self.run_hook(self.prompt_payload(prompt))
+
+        self.assertIsNotNone(result)
+        context = result["hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("<office-os-source-free-intake>", context)
+        self.assertTrue(context.startswith("<office-os-intake>\n"), context)
+        self.assertFalse((self.plugin_data / "pending_intakes.json").exists())
+        self.assertTrue((self.plugin_data / "workspaces").exists())
 
     def test_missing_source_intake_classifies_before_office_work(self) -> None:
         result = self.run_hook(
