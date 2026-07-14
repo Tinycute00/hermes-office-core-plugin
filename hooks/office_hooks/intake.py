@@ -18,11 +18,20 @@ from office_hooks.source_free import (
     expected_source_free_reply,
     source_free_intake_context,
 )
-from office_hooks.state import plugin_data_root, plugin_root, workspace_dir
+from office_hooks.state import HookStateError, plugin_data_root, plugin_root, workspace_dir
 from office_hooks.storage import read_json, write_json
 
 
 MAX_DEDUP_KEYS = 128
+
+
+def require_prompt_identity(payload: dict[str, Any]) -> None:
+    for name in ("session_id", "turn_id"):
+        value = payload.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise HookStateError(
+                "Office OS intake requires non-empty session_id and turn_id values."
+            )
 
 
 def prompt_reference(prompt: str) -> tuple[str, ...]:
@@ -60,11 +69,15 @@ def remember_prompt(directory: Path, payload: dict[str, Any], prompt: str) -> bo
 def handle_user_prompt(payload: dict[str, Any]) -> None:
     prompt = str(payload.get("prompt") or "")
     if prompt.lstrip().startswith(STOP_CORRECTION_PREFIX):
+        plugin_data_root()
+        require_prompt_identity(payload)
         discard_pending_intake(payload)
         return
     if not prompt or not is_office_prompt(prompt):
         discard_pending_intake(payload)
         return
+    plugin_data_root()
+    require_prompt_identity(payload)
     cwd = str(payload.get("cwd") or os.getcwd())
     if not has_named_local_source(prompt, cwd):
         remember_pending_intake(payload, expected_source_free_reply(prompt))

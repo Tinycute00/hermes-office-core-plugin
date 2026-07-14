@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,11 @@ class IntakeRouterCase(unittest.TestCase):
         self.plugin_data = self.base / "plugin-data"
 
     def run_hook(
-        self, payload: dict[str, str], *, with_plugin_data: bool = True
+        self,
+        payload: dict[str, str],
+        *,
+        with_plugin_data: bool = True,
+        expected_returncode: int = 0,
     ) -> dict[str, object] | None:
         environment = os.environ.copy()
         environment["PLUGIN_ROOT"] = os.fspath(ROOT)
@@ -41,11 +46,7 @@ class IntakeRouterCase(unittest.TestCase):
             cwd=self.workspace,
             check=False,
         )
-        self.assertEqual(
-            completed.returncode,
-            0,
-            msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
-        )
+        self.assertEqual(completed.returncode, expected_returncode, msg=f"stdout={completed.stdout}\nstderr={completed.stderr}")
         return json.loads(completed.stdout) if completed.stdout.strip() else None
 
     def prompt_payload(
@@ -60,10 +61,23 @@ class IntakeRouterCase(unittest.TestCase):
         }
 
     def pending_entries(self) -> list[dict[str, object]]:
-        data = json.loads(
-            (self.plugin_data / "pending_intakes.json").read_text(encoding="utf-8")
-        )
-        return data["entries"]
+        return json.loads((self.plugin_data / "pending_intakes.json").read_text(encoding="utf-8"))["entries"]
+
+    def create_directory_link(self, link: Path, target: Path) -> None:
+        if os.name == "nt":
+            completed = subprocess.run(["cmd", "/c", "mklink", "/J", os.fspath(link), os.fspath(target)], text=True, capture_output=True, check=False)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+        else:
+            link.symlink_to(target, target_is_directory=True)
+        self.addCleanup(self.remove_directory_link, link)
+
+    def remove_directory_link(self, link: Path) -> None:
+        if not os.path.lexists(link):
+            return
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            link.unlink()
 
     def test_source_free_prompt_emits_exact_two_line_contract(self) -> None:
         result = self.run_hook(
@@ -200,6 +214,48 @@ class IntakeRouterCase(unittest.TestCase):
             self.assertEqual(self.run_hook(payload, with_plugin_data=False), {})
 
         self.assertFalse(self.plugin_data.exists())
+
+    def test_missing_or_blank_identity_refuses_source_free_and_named_prompts(self) -> None:
+        source_free = self.prompt_payload("Schedule an Excel spreadsheet")
+        source_free.pop("session_id")
+        self.assertIsNone(self.run_hook(source_free, expected_returncode=1))
+        self.assertFalse(self.plugin_data.exists())
+
+        (self.workspace / "budget.xlsx").touch()
+        named = self.prompt_payload("Review budget.xlsx")
+        named["turn_id"] = ""
+        self.assertIsNone(self.run_hook(named, expected_returncode=1))
+        self.assertFalse(self.plugin_data.exists())
+
+    def test_hardlinked_pending_intake_refuses_without_touching_outside_sentinel(self) -> None:
+        self.plugin_data.mkdir()
+        sentinel = self.base / "outside-pending.json"
+        sentinel.write_text('{"entries":[]}', encoding="utf-8")
+        os.link(sentinel, self.plugin_data / "pending_intakes.json")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+
+        self.assertIsNone(
+            self.run_hook(
+                self.prompt_payload("Schedule an Excel spreadsheet"), expected_returncode=1
+            )
+        )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
+
+    def test_linked_pending_intake_refuses_without_touching_outside_sentinel(self) -> None:
+        self.plugin_data.mkdir()
+        outside = self.base / "outside-pending"
+        outside.mkdir()
+        sentinel = outside / "sentinel.txt"
+        sentinel.write_text("outside", encoding="utf-8")
+        before = hashlib.sha256(sentinel.read_bytes()).hexdigest()
+        self.create_directory_link(self.plugin_data / "pending_intakes.json", outside)
+
+        self.assertIsNone(
+            self.run_hook(
+                self.prompt_payload("Schedule an Excel spreadsheet"), expected_returncode=1
+            )
+        )
+        self.assertEqual(hashlib.sha256(sentinel.read_bytes()).hexdigest(), before)
 
     def test_pending_and_workspace_dedup_state_excludes_raw_prompt_and_session(self) -> None:
         session_id = "session-private-value"
