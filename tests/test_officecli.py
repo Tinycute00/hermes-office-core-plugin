@@ -1077,7 +1077,7 @@ class OfficeCLICase(unittest.TestCase):
                 "const {spawn}=require('node:child_process');const fs=require('node:fs');"
                 "const mode=process.argv[2],pidFile=process.argv[3];"
                 "const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});"
-                "fs.writeFileSync(pidFile,String(child.pid));"
+                "fs.writeFileSync(pidFile,JSON.stringify({child:child.pid,parent:process.pid}));"
                 "if(mode==='overflow')process.stdout.write(Buffer.alloc(9*1024*1024,120));"
                 "setInterval(()=>{},1000);",
                 encoding="utf-8",
@@ -1111,11 +1111,29 @@ class OfficeCLICase(unittest.TestCase):
                 )
                 self.assertTrue(result["isError"])
                 self.assertLess(len(result["content"][0]["text"]), 20_000)
-                pid = int(pid_file.read_text(encoding="utf-8"))
+                pids = json.loads(pid_file.read_text(encoding="utf-8"))
+                pid = int(pids["child"])
+                parent_pid = int(pids["parent"])
                 alive = process_exists(pid)
+                process_state = "unavailable"
+                if os.name != "nt":
+                    process_state = subprocess.run(
+                        [
+                            "ps",
+                            "-o",
+                            "pid=,ppid=,pgid=,sid=,stat=,comm=",
+                            "-p",
+                            f"{parent_pid},{pid}",
+                        ],
+                        text=True,
+                        encoding="utf-8",
+                        capture_output=True,
+                        check=False,
+                    ).stdout.strip()
                 print(
-                    f"[CI-DIAG] runner-tree mode={mode} pid={pid} "
-                    f"alive={alive} result={result['content'][0]['text'][:160]!r}",
+                    f"[CI-DIAG] runner-tree mode={mode} parent={parent_pid} child={pid} "
+                    f"alive={alive} ps={process_state!r} "
+                    f"result={result['content'][0]['text'][:160]!r}",
                     flush=True,
                 )
                 try:
