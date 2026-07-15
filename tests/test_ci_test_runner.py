@@ -222,6 +222,19 @@ class CiTestRunnerCase(unittest.TestCase):
         )
         self.assertEqual(wait_for_group.call_count, 2)
 
+    def test_other_posix_group_wait_reaps_the_exited_root(self) -> None:
+        runner = load_runner()
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = 0
+        with mock.patch.object(
+            runner.os, "killpg", side_effect=ProcessLookupError, create=True
+        ) as killpg:
+            self.assertTrue(runner.wait_for_posix_process_group_exit(process, 1.0))
+
+        process.poll.assert_called()
+        killpg.assert_called_once_with(process.pid, 0)
+
     def test_normal_exit_is_returned_without_timeout(self) -> None:
         runner = load_runner()
         result = runner.run_command(
