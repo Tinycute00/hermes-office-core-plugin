@@ -144,6 +144,54 @@ class CiTestRunnerCase(unittest.TestCase):
                 if pid is not None:
                     terminate_test_process(pid)
 
+    @unittest.skipIf(os.name == "nt", "requires POSIX process groups")
+    def test_posix_detached_child_is_terminated_after_timeout(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(prefix="office-os-ci-runner-") as directory:
+            child_pid = Path(directory) / "detached-child.pid"
+            child_program = (
+                "from pathlib import Path; import os, sys, time; "
+                "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+                "time.sleep(60)"
+            )
+            parent_program = (
+                "import subprocess, sys, time; "
+                "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]], "
+                "start_new_session=True); "
+                "time.sleep(60)"
+            )
+
+            pid: int | None = None
+            try:
+                result = runner.run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        parent_program,
+                        os.fspath(child_pid),
+                        child_program,
+                    ],
+                    timeout_seconds=2.0,
+                    grace_seconds=1.0,
+                )
+
+                self.assertTrue(result.timed_out)
+                self.assertEqual(result.exit_code, 124)
+                self.assertTrue(child_pid.exists(), "detached child process did not start")
+                pid = int(child_pid.read_text(encoding="utf-8"))
+                for _ in range(20):
+                    if not process_exists(pid):
+                        break
+                    time.sleep(0.1)
+                self.assertFalse(
+                    process_exists(pid), f"orphaned detached child PID {pid}"
+                )
+            finally:
+                if pid is None and child_pid.exists():
+                    pid = int(child_pid.read_text(encoding="utf-8"))
+                if pid is not None:
+                    terminate_test_process(pid)
+
     def test_normal_exit_is_returned_without_timeout(self) -> None:
         runner = load_runner()
         result = runner.run_command(
