@@ -1,6 +1,6 @@
 {
   "name": "office-os",
-  "version": "0.3.0",
+  "version": "0.3.0+codex.20260715044403",
   "description": "Local-first Office workflows with immutable sources, managed candidate editing, bounded publishing, and optional recurrence.",
   "author": {
     "name": "Tinycute00",
@@ -12,7 +12,6 @@
   "keywords": ["office", "excel", "word", "powerpoint", "pdf", "workflow"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Office OS",
     "shortDescription": "Run bounded local Office work from plain language.",
