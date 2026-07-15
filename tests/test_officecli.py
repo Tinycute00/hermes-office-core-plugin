@@ -246,6 +246,32 @@ def process_exists(pid: int) -> bool:
     return True
 
 
+def print_subreaper_children(phase: str) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    parent = os.getppid()
+    children_file = Path("/proc") / str(parent) / "task" / str(parent) / "children"
+    try:
+        child_pids = children_file.read_text(encoding="utf-8").split()
+    except OSError as error:
+        print(f"[CI-DIAG] runner-tree phase={phase} children-error={error}", flush=True)
+        return
+    states = []
+    for child_pid in child_pids:
+        try:
+            stat = (Path("/proc") / child_pid / "stat").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        _, separator, fields = stat.rpartition(")")
+        if separator:
+            states.append(f"{child_pid}:{fields.split()[0]}")
+    print(
+        f"[CI-DIAG] runner-tree phase={phase} subreaper={parent} "
+        f"children={','.join(states) or '-'}",
+        flush=True,
+    )
+
+
 def run_adapter(
     payload: bytes,
     data_root: Path,
@@ -1091,6 +1117,7 @@ class OfficeCLICase(unittest.TestCase):
                 encoding="utf-8",
             )
             print("[CI-DIAG] runner-tree phase=constants", flush=True)
+            print_subreaper_children("constants")
             constants = run_runner({"constants": True}, data_root)
             self.assertEqual(constants["normalTimeoutMs"], 60_000)
             self.assertEqual(constants["screenshotTimeoutMs"], 120_000)
@@ -1098,6 +1125,7 @@ class OfficeCLICase(unittest.TestCase):
             self.assertEqual(constants["streamLimitBytes"], 8 * 1024 * 1024)
             self.assertEqual(constants["pngLimitBytes"], 16 * 1024 * 1024)
             print("[CI-DIAG] runner-tree phase=environment", flush=True)
+            print_subreaper_children("environment")
             environment = run_runner({"environment": True}, data_root)
             self.assertEqual(
                 {key: value for key, value in environment.items() if key.startswith("OFFICECLI_")},
@@ -1110,6 +1138,7 @@ class OfficeCLICase(unittest.TestCase):
             for mode in ("hang", "overflow"):
                 pid_file = base / f"{mode}.pid"
                 print(f"[CI-DIAG] runner-tree phase={mode}-start", flush=True)
+                print_subreaper_children(f"{mode}-start")
                 result = run_runner(
                     {
                         "parsed": {
@@ -1121,6 +1150,7 @@ class OfficeCLICase(unittest.TestCase):
                     data_root,
                 )
                 print(f"[CI-DIAG] runner-tree phase={mode}-returned", flush=True)
+                print_subreaper_children(f"{mode}-returned")
                 self.assertTrue(result["isError"])
                 self.assertLess(len(result["content"][0]["text"]), 20_000)
                 pids = json.loads(pid_file.read_text(encoding="utf-8"))
@@ -1161,8 +1191,10 @@ class OfficeCLICase(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary) / "plugin-data"
             print("[CI-DIAG] runner-tree phase=nonsettling-start", flush=True)
+            print_subreaper_children("nonsettling-start")
             result = run_runner({"nonsettlingKill": True}, data_root)
             print("[CI-DIAG] runner-tree phase=nonsettling-returned", flush=True)
+            print_subreaper_children("nonsettling-returned")
         self.assertEqual(result["error"], "OfficeCLI command timed out. Process termination did not complete.")
 
     def test_screenshot_success_and_failure_cleanup(self) -> None:
@@ -1253,6 +1285,7 @@ class OfficeCLICase(unittest.TestCase):
                 (candidate_root / f"candidate-{number}.xlsx").write_bytes(b"x")
             marker = base / "child-ran"
             print("[CI-DIAG] runner-tree phase=quota-pre-start", flush=True)
+            print_subreaper_children("quota-pre-start")
             result = run_runner(
                 {
                     "parsed": {
@@ -1267,6 +1300,7 @@ class OfficeCLICase(unittest.TestCase):
                 data_root,
             )
             print("[CI-DIAG] runner-tree phase=quota-pre-returned", flush=True)
+            print_subreaper_children("quota-pre-returned")
             self.assertTrue(result["isError"])
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertFalse(marker.exists())
@@ -1283,6 +1317,7 @@ class OfficeCLICase(unittest.TestCase):
                 "fs.writeFileSync(path.join(process.argv[1],'candidate-'+index+'.xlsx'),'x');}"
             )
             print("[CI-DIAG] runner-tree phase=quota-growth-start", flush=True)
+            print_subreaper_children("quota-growth-start")
             result = run_runner(
                 {
                     "parsed": {
@@ -1293,6 +1328,7 @@ class OfficeCLICase(unittest.TestCase):
                 data_root,
             )
             print("[CI-DIAG] runner-tree phase=quota-growth-returned", flush=True)
+            print_subreaper_children("quota-growth-returned")
             self.assertTrue(result["isError"])
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertEqual(len(list(candidate_root.iterdir())), 33)
