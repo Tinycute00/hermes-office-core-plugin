@@ -193,6 +193,57 @@ class CiTestRunnerCase(unittest.TestCase):
                 if pid is not None:
                     terminate_test_process(pid)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux /proc")
+    def test_posix_detached_child_is_terminated_after_normal_exit(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory(prefix="office-os-ci-runner-") as directory:
+            child_pid = Path(directory) / "normal-detached-child.pid"
+            child_program = (
+                "from pathlib import Path; import os, sys, time; "
+                "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+                "time.sleep(60)"
+            )
+            parent_program = (
+                "import subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]], "
+                "start_new_session=True)"
+            )
+
+            pid: int | None = None
+            try:
+                result = runner.run_command(
+                    [
+                        sys.executable,
+                        "-c",
+                        parent_program,
+                        os.fspath(child_pid),
+                        child_program,
+                    ],
+                    timeout_seconds=2.0,
+                    grace_seconds=1.0,
+                )
+
+                self.assertFalse(result.timed_out)
+                self.assertEqual(result.exit_code, 0)
+                for _ in range(20):
+                    if child_pid.exists():
+                        break
+                    time.sleep(0.1)
+                self.assertTrue(child_pid.exists(), "detached child process did not start")
+                pid = int(child_pid.read_text(encoding="utf-8"))
+                for _ in range(20):
+                    if not process_exists(pid):
+                        break
+                    time.sleep(0.1)
+                self.assertFalse(
+                    process_exists(pid), f"orphaned normal-exit child PID {pid}"
+                )
+            finally:
+                if pid is None and child_pid.exists():
+                    pid = int(child_pid.read_text(encoding="utf-8"))
+                if pid is not None:
+                    terminate_test_process(pid)
+
     def test_other_posix_tree_kills_lingering_group_after_root_exits(self) -> None:
         runner = load_runner()
         process = mock.Mock()
