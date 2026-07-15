@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -17,17 +18,157 @@ class RunResult:
     timed_out: bool
 
 
-def wait_for_process_group_exit(process_group: int, timeout_seconds: float) -> bool:
+@dataclass(frozen=True)
+class LinuxProcessIdentity:
+    pid: int
+    parent_pid: int
+    process_group: int
+    start_ticks: int
+    state: str
+
+
+def read_linux_process_identity(pid: int) -> LinuxProcessIdentity | None:
+    try:
+        stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return None
+    _, separator, fields_text = stat.rpartition(")")
+    if not separator:
+        return None
+    fields = fields_text.split()
+    if len(fields) <= 19:
+        return None
+    try:
+        return LinuxProcessIdentity(
+            pid=pid,
+            parent_pid=int(fields[1]),
+            process_group=int(fields[2]),
+            start_ticks=int(fields[19]),
+            state=fields[0],
+        )
+    except ValueError:
+        return None
+
+
+def snapshot_linux_process_tree(root_pid: int) -> dict[int, LinuxProcessIdentity]:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        raise RuntimeError("Linux CI watchdog requires a readable /proc process table.")
+    all_processes: dict[int, LinuxProcessIdentity] = {}
+    children: dict[int, list[int]] = {}
+    for entry in proc_root.iterdir():
+        if not entry.name.isdecimal():
+            continue
+        identity = read_linux_process_identity(int(entry.name))
+        if identity is None:
+            continue
+        all_processes[identity.pid] = identity
+        children.setdefault(identity.parent_pid, []).append(identity.pid)
+
+    pending = [root_pid]
+    tree: dict[int, LinuxProcessIdentity] = {}
+    while pending:
+        pid = pending.pop()
+        identity = all_processes.get(pid)
+        if identity is None or pid in tree:
+            continue
+        tree[pid] = identity
+        pending.extend(children.get(pid, []))
+    return tree
+
+
+def linux_process_is_live(identity: LinuxProcessIdentity) -> bool:
+    current = read_linux_process_identity(identity.pid)
+    return (
+        current is not None
+        and current.start_ticks == identity.start_ticks
+        and current.state not in {"X", "Z"}
+    )
+
+
+def wait_for_linux_processes_exit(
+    identities: dict[int, LinuxProcessIdentity], timeout_seconds: float
+) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while True:
-        try:
-            os.killpg(process_group, 0)
-        except ProcessLookupError:
+        if not any(linux_process_is_live(identity) for identity in identities.values()):
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
         time.sleep(min(0.05, remaining))
+
+
+def signal_linux_process_tree(
+    identities: dict[int, LinuxProcessIdentity], signal_number: int
+) -> None:
+    own_group = os.getpgrp()
+    signalled_groups: set[int] = set()
+    for process_group in sorted({item.process_group for item in identities.values()}):
+        leader = identities.get(process_group)
+        if (
+            process_group == own_group
+            or leader is None
+            or not linux_process_is_live(leader)
+        ):
+            continue
+        try:
+            os.killpg(process_group, signal_number)
+        except ProcessLookupError:
+            continue
+        signalled_groups.add(process_group)
+
+    for identity in identities.values():
+        if identity.process_group in signalled_groups or not linux_process_is_live(identity):
+            continue
+        try:
+            os.kill(identity.pid, signal_number)
+        except ProcessLookupError:
+            continue
+
+
+def wait_for_process_exit(process: subprocess.Popen[object], timeout_seconds: float) -> bool:
+    if process.poll() is not None:
+        return True
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def terminate_linux_process_tree(
+    process: subprocess.Popen[object], grace_seconds: float
+) -> None:
+    identities = snapshot_linux_process_tree(process.pid)
+    if not identities:
+        if process.poll() is not None:
+            return
+        raise RuntimeError("could not snapshot the timed-out Linux test process tree.")
+    signal_linux_process_tree(identities, signal.SIGTERM)
+    if wait_for_linux_processes_exit(identities, grace_seconds):
+        if not wait_for_process_exit(process, grace_seconds):
+            raise RuntimeError("SIGTERM did not reap the timed-out test process.")
+        return
+    signal_linux_process_tree(identities, signal.SIGKILL)
+    if not wait_for_linux_processes_exit(identities, grace_seconds):
+        raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
+    if not wait_for_process_exit(process, grace_seconds):
+        raise RuntimeError("SIGKILL did not reap the timed-out test process.")
+
+
+def terminate_other_posix_process_tree(
+    process: subprocess.Popen[object], grace_seconds: float
+) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    if wait_for_process_exit(process, grace_seconds):
+        return
+    os.killpg(process.pid, signal.SIGKILL)
+    if not wait_for_process_exit(process, grace_seconds):
+        raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
 
 
 def terminate_process_tree(process: subprocess.Popen[object], grace_seconds: float) -> None:
@@ -50,19 +191,10 @@ def terminate_process_tree(process: subprocess.Popen[object], grace_seconds: flo
                     f"(exit={result.returncode})."
                 ) from error
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if sys.platform.startswith("linux"):
+        terminate_linux_process_tree(process, grace_seconds)
         return
-    if wait_for_process_group_exit(process.pid, grace_seconds):
-        if process.poll() is None:
-            process.wait(timeout=grace_seconds)
-        return
-    os.killpg(process.pid, signal.SIGKILL)
-    if not wait_for_process_group_exit(process.pid, grace_seconds):
-        raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
-    if process.poll() is None:
-        process.wait(timeout=grace_seconds)
+    terminate_other_posix_process_tree(process, grace_seconds)
 
 
 def run_command(
