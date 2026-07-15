@@ -185,18 +185,44 @@ function pngCrc(data) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
+function linuxProcessGroupHasLiveMembers(processGroupId) {
+  let entries;
+  try {
+    entries = fs.readdirSync("/proc", { withFileTypes: true });
+  } catch {
+    return true;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+    let stat;
+    try {
+      stat = fs.readFileSync(path.join("/proc", entry.name, "stat"), "utf8");
+    } catch {
+      continue;
+    }
+    const closingParenthesis = stat.lastIndexOf(")");
+    const fields = closingParenthesis < 0 ? [] : stat.slice(closingParenthesis + 1).trim().split(/\s+/);
+    if (fields.length < 3 || Number.parseInt(fields[2], 10) !== processGroupId) continue;
+    if (fields[0] !== "Z" && fields[0] !== "X") return true;
+  }
+  return false;
+}
+
+function processGroupExited(processGroupId) {
+  try {
+    process.kill(-processGroupId, 0);
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+  return process.platform === "linux" && !linuxProcessGroupHasLiveMembers(processGroupId);
+}
+
 function waitForProcessGroupExit(processGroupId, timeoutMs) {
   return new Promise((resolve) => {
     const deadline = Date.now() + timeoutMs;
     const check = () => {
-      try {
-        process.kill(-processGroupId, 0);
-      } catch (error) {
-        if (error.code === "ESRCH") {
-          resolve(true);
-          return;
-        }
-        resolve(false);
+      if (processGroupExited(processGroupId)) {
+        resolve(true);
         return;
       }
       const remaining = deadline - Date.now();
