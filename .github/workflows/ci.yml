@@ -19,6 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run OfficeCLI tree-kill diagnosis
+      - name: Run OfficeCLI shutdown diagnosis
         shell: bash
-        run: python -u scripts/ci_test_runner.py --timeout-seconds 30 --grace-seconds 5 -- python -u -m unittest -v tests.test_officecli.OfficeCLICase.test_runner_kills_tree_on_timeout_and_overflow
+        run: python -u scripts/ci_test_runner.py --timeout-seconds 420 --grace-seconds 5 -- python -u -m unittest -v tests.test_officecli

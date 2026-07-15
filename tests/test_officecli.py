@@ -1090,12 +1090,14 @@ class OfficeCLICase(unittest.TestCase):
                 "setInterval(()=>{},1000);",
                 encoding="utf-8",
             )
+            print("[CI-DIAG] runner-tree phase=constants", flush=True)
             constants = run_runner({"constants": True}, data_root)
             self.assertEqual(constants["normalTimeoutMs"], 60_000)
             self.assertEqual(constants["screenshotTimeoutMs"], 120_000)
             self.assertEqual(constants["terminationGraceMs"], 5_000)
             self.assertEqual(constants["streamLimitBytes"], 8 * 1024 * 1024)
             self.assertEqual(constants["pngLimitBytes"], 16 * 1024 * 1024)
+            print("[CI-DIAG] runner-tree phase=environment", flush=True)
             environment = run_runner({"environment": True}, data_root)
             self.assertEqual(
                 {key: value for key, value in environment.items() if key.startswith("OFFICECLI_")},
@@ -1107,6 +1109,7 @@ class OfficeCLICase(unittest.TestCase):
             )
             for mode in ("hang", "overflow"):
                 pid_file = base / f"{mode}.pid"
+                print(f"[CI-DIAG] runner-tree phase={mode}-start", flush=True)
                 result = run_runner(
                     {
                         "parsed": {
@@ -1117,6 +1120,7 @@ class OfficeCLICase(unittest.TestCase):
                     },
                     data_root,
                 )
+                print(f"[CI-DIAG] runner-tree phase={mode}-returned", flush=True)
                 self.assertTrue(result["isError"])
                 self.assertLess(len(result["content"][0]["text"]), 20_000)
                 pids = json.loads(pid_file.read_text(encoding="utf-8"))
