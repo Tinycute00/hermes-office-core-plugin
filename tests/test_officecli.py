@@ -156,22 +156,19 @@ def run_authorizer_with_reparse_probe(
     candidate: Path, data_root: Path, file_candidate: Path | None = None, repeats: int = 1
 ) -> dict:  # noqa: DICT_OK
     script = (
-        "const Module=require('node:module');const original=Module._load;let probes=0;const batches=[];"
-        "Module._load=function(request,parent,isMain){if(request==='node:child_process'){"
-        "const child=original.apply(this,arguments);return {...child,spawnSync:(_command,_arguments,options)=>{"
-        "probes+=1;const paths=JSON.parse(options.env.OFFICE_OS_REPARSE_PATHS).paths;batches.push(paths);"
-        "return {status:0,stdout:JSON.stringify(paths.map(()=>false))};}};}"
-        "return original.apply(this,arguments);};const authority=require(process.argv[1]);"
-        "const files=process.argv[3]?[process.argv[3]]:[];const runs=[],errors=[];"
-        "for(let index=0;index<Number(process.argv[4]);index+=1){try{"
-        "runs.push(authority.authorizeMutation(process.argv[2],files));}"
+        "const path=require('node:path');const paths=require(process.argv[1]);let probes=0;const batches=[];"
+        "paths.windowsReparsePoints=(targets)=>{probes+=1;const batch=targets.map(target=>path.resolve(target));"
+        "batches.push(batch);return new Set();};const authority=require(process.argv[2]);"
+        "const files=process.argv[4]?[process.argv[4]]:[];const runs=[],errors=[];"
+        "for(let index=0;index<Number(process.argv[5]);index+=1){try{"
+        "runs.push(authority.authorizeMutation(process.argv[3],files));}"
         "catch(error){errors.push(error.message);}}"
         "process.stdout.write(JSON.stringify({run:runs[0],error:errors[0],runs,errors,probes,batches}));"
     )
     environment = os.environ.copy()
     environment["PLUGIN_DATA"] = os.fspath(data_root)
     completed = subprocess.run(
-        [NODE or "node", "-e", script, os.fspath(AUTHORITY), os.fspath(candidate),
+        [NODE or "node", "-e", script, os.fspath(PATHS), os.fspath(AUTHORITY), os.fspath(candidate),
          "" if file_candidate is None else os.fspath(file_candidate), str(repeats)],
         cwd=ROOT,
         env=environment,
@@ -1540,10 +1537,13 @@ class OfficeCLICase(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows reparse-point timeout is Windows-specific")
     def test_windows_reparse_probe_is_timeout_bounded(self) -> None:
         script = (
-            "const paths=require(process.argv[1]);let options;"
-            "paths.windowsReparsePoints([process.argv[2]],(_command,_arguments,value)=>{"
-            "options=value;return {status:0,stdout:'[false]'};});"
-            "process.stdout.write(JSON.stringify({timeout:options.timeout}));"
+            "const paths=require(process.argv[1]);let command,argumentsValue,options;"
+            "const result=paths.inspectWindowsReparseBatch([process.argv[2]],(name,args,value)=>{"
+            "command=name;argumentsValue=args;options=value;"
+            "return {status:1,stdout:'Error 4390: ordinary path.',stderr:''};});"
+            "let rejected=false;try{paths.inspectWindowsReparseBatch([process.argv[2]],()=>({status:1,stdout:'Error 5'}));}"
+            "catch(error){rejected=error.message.includes('Could not inspect');}"
+            "process.stdout.write(JSON.stringify({command,argumentsValue,timeout:options.timeout,empty:result.size===0,rejected}));"
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             target = Path(temporary) / "regular"
@@ -1557,9 +1557,55 @@ class OfficeCLICase(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            timeout = json.loads(completed.stdout)["timeout"]
-            self.assertGreater(timeout, 0)
-            self.assertLessEqual(timeout, 5_000)
+            result = json.loads(completed.stdout)
+            self.assertTrue(result["command"].lower().endswith("fsutil.exe"))
+            self.assertEqual(result["argumentsValue"], ["reparsepoint", "query", os.fspath(target)])
+            self.assertTrue(result["empty"])
+            self.assertTrue(result["rejected"])
+            self.assertGreater(result["timeout"], 0)
+            self.assertLessEqual(result["timeout"], 5_000)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point process behavior is Windows-specific")
+    def test_windows_reparse_probe_completes_when_reused_in_one_node_process(self) -> None:
+        script = (
+            "const paths=require(process.argv[1]);const target=process.argv[2];"
+            "let work=Promise.resolve();for(let i=0;i<5;i+=1){"
+            "work=work.then(()=>paths.resolveCandidatePath(target));}"
+            "work.then(()=>process.stdout.write('ok'))"
+            ".catch(error=>{process.stderr.write(error.stack||error.message);process.exitCode=1;});"
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            data_root = Path(temporary) / "plugin-data"
+            target = data_root / "officecli-candidates" / "candidate.xlsx"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"candidate")
+            environment = os.environ.copy()
+            environment["PLUGIN_DATA"] = os.fspath(data_root)
+            process = subprocess.Popen(
+                [NODE or "node", "-e", script, os.fspath(PATHS), os.fspath(target)],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            )
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                cleanup = subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    text=True,
+                    encoding="utf-8",
+                    capture_output=True,
+                    check=False,
+                )
+                process.communicate(timeout=5)
+                self.fail(
+                    "Repeated Windows candidate-path probes did not complete within 10 seconds; "
+                    f"taskkill stdout={cleanup.stdout!r} stderr={cleanup.stderr!r}"
+                )
+            self.assertEqual(process.returncode, 0, stderr.decode("utf-8", "replace"))
+            self.assertEqual(stdout, b"ok")
 
     def test_policy_rejects_case_and_option_smuggling_in_get_selector(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

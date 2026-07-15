@@ -4,9 +4,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const REPARSE_PATHS_ENV = "OFFICE_OS_REPARSE_PATHS";
 const REPARSE_PROBE_TIMEOUT_MS = 2_000;
-const POWERSHELL_REPARSE_COMMAND = "$ErrorActionPreference='Stop';$items=(ConvertFrom-Json -InputObject $env:OFFICE_OS_REPARSE_PATHS).paths;$flags=@(foreach($itemPath in $items){$item=Get-Item -Force -LiteralPath $itemPath;[bool](($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)});[Console]::Out.Write((ConvertTo-Json -InputObject @($flags) -Compress))";
+const MAX_REPARSE_PATHS_PER_BATCH = 64;
+const ERROR_NOT_A_REPARSE_POINT = 4390;
 
 class PathPolicyError extends Error {}
 
@@ -38,27 +38,41 @@ function lstatOrNull(target) {
   }
 }
 
-function windowsReparsePoints(targets, execute = spawnSync) {
+function fsutilExecutable() {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  return systemRoot ? path.join(systemRoot, "System32", "fsutil.exe") : "fsutil.exe";
+}
+
+function inspectWindowsReparseBatch(targets, execute = spawnSync) {
+  const reparsePoints = new Set();
+  for (const target of targets) {
+    const result = execute(fsutilExecutable(), ["reparsepoint", "query", target], {
+      encoding: "utf8",
+      shell: false,
+      timeout: REPARSE_PROBE_TIMEOUT_MS,
+      windowsHide: true,
+    });
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    if (!result.error && result.status === 0) {
+      reparsePoints.add(target);
+      continue;
+    }
+    if (!result.error && result.status === 1 && new RegExp(`\\b${ERROR_NOT_A_REPARSE_POINT}\\b`).test(output)) continue;
+    throw new PathPolicyError("Could not inspect Windows reparse-point attributes.");
+  }
+  return reparsePoints;
+}
+
+function windowsReparsePoints(targets, inspectBatch = inspectWindowsReparseBatch) {
   if (process.platform !== "win32" || targets.length === 0) return new Set();
   const values = targets.map((target) => path.resolve(target));
-  const result = execute("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_REPARSE_COMMAND], {
-    encoding: "utf8",
-    env: { ...process.env, [REPARSE_PATHS_ENV]: JSON.stringify({ paths: values }) },
-    shell: false,
-    timeout: REPARSE_PROBE_TIMEOUT_MS,
-    windowsHide: true,
-  });
-  if (result.error || result.status !== 0) throw new PathPolicyError("Could not inspect Windows reparse-point attributes.");
-  let flags;
-  try {
-    flags = JSON.parse(result.stdout);
-  } catch {
-    throw new PathPolicyError("Could not inspect Windows reparse-point attributes.");
+  const reparsePoints = new Set();
+  for (let index = 0; index < values.length; index += MAX_REPARSE_PATHS_PER_BATCH) {
+    for (const target of inspectBatch(values.slice(index, index + MAX_REPARSE_PATHS_PER_BATCH))) {
+      reparsePoints.add(target);
+    }
   }
-  if (!Array.isArray(flags) || flags.length !== values.length || !flags.every((value) => typeof value === "boolean")) {
-    throw new PathPolicyError("Could not inspect Windows reparse-point attributes.");
-  }
-  return new Set(values.filter((_target, index) => flags[index]));
+  return reparsePoints;
 }
 
 function isLinklike(target, status = lstatOrNull(target), reparsePoints = null) {
@@ -169,7 +183,9 @@ module.exports = {
   candidateRoot,
   isContained,
   isLinklike,
+  inspectWindowsReparseBatch,
   linkedAncestor,
+  REPARSE_PROBE_TIMEOUT_MS,
   resolveCandidatePath,
   windowsReparsePoints,
 };
