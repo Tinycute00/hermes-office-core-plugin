@@ -23,7 +23,7 @@ jobs:
 
   test-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 13
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,4 +33,4 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run Office OS tests
-        run: timeout --foreground --kill-after=30s 12m python -m unittest discover -s tests -v
+        run: python scripts/ci_test_runner.py --timeout-seconds 720 --grace-seconds 15 -- python -m unittest discover -s tests -v
