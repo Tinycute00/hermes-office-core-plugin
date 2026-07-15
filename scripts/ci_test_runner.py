@@ -12,6 +12,9 @@ import sys
 import time
 
 
+PR_SET_CHILD_SUBREAPER = 36
+
+
 @dataclass(frozen=True)
 class RunResult:
     exit_code: int
@@ -25,6 +28,30 @@ class LinuxProcessIdentity:
     process_group: int
     start_ticks: int
     state: str
+
+
+def enable_linux_child_subreaper() -> None:
+    """Adopt descendants that a normally exiting test command leaves behind."""
+    import ctypes
+
+    try:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except AttributeError as error:
+        raise RuntimeError("Linux CI watchdog could not load prctl.") from error
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    if prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error_number = ctypes.get_errno()
+        raise RuntimeError(
+            "Linux CI watchdog could not enable child-sub-reaper mode "
+            f"(errno={error_number})."
+        )
 
 
 def read_linux_process_identity(pid: int) -> LinuxProcessIdentity | None:
@@ -99,6 +126,21 @@ def wait_for_linux_processes_exit(
         time.sleep(min(0.05, remaining))
 
 
+def reap_linux_zombie_children(identities: dict[int, LinuxProcessIdentity]) -> None:
+    for identity in identities.values():
+        current = read_linux_process_identity(identity.pid)
+        if (
+            current is None
+            or current.start_ticks != identity.start_ticks
+            or current.state != "Z"
+        ):
+            continue
+        try:
+            os.waitpid(identity.pid, os.WNOHANG)
+        except ChildProcessError:
+            continue
+
+
 def wait_for_posix_process_group_exit(
     process: subprocess.Popen[object], timeout_seconds: float
 ) -> bool:
@@ -153,6 +195,19 @@ def wait_for_process_exit(process: subprocess.Popen[object], timeout_seconds: fl
     return True
 
 
+def terminate_linux_processes(
+    identities: dict[int, LinuxProcessIdentity], grace_seconds: float
+) -> None:
+    if not identities:
+        return
+    signal_linux_process_tree(identities, signal.SIGTERM)
+    if wait_for_linux_processes_exit(identities, grace_seconds):
+        return
+    signal_linux_process_tree(identities, signal.SIGKILL)
+    if not wait_for_linux_processes_exit(identities, grace_seconds):
+        raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
+
+
 def terminate_linux_process_tree(
     process: subprocess.Popen[object], grace_seconds: float
 ) -> None:
@@ -161,16 +216,36 @@ def terminate_linux_process_tree(
         if process.poll() is not None:
             return
         raise RuntimeError("could not snapshot the timed-out Linux test process tree.")
-    signal_linux_process_tree(identities, signal.SIGTERM)
-    if wait_for_linux_processes_exit(identities, grace_seconds):
-        if not wait_for_process_exit(process, grace_seconds):
-            raise RuntimeError("SIGTERM did not reap the timed-out test process.")
-        return
-    signal_linux_process_tree(identities, signal.SIGKILL)
-    if not wait_for_linux_processes_exit(identities, grace_seconds):
-        raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
+    terminate_linux_processes(identities, grace_seconds)
     if not wait_for_process_exit(process, grace_seconds):
         raise RuntimeError("SIGKILL did not reap the timed-out test process.")
+    reap_linux_zombie_children(
+        {pid: identity for pid, identity in identities.items() if pid != process.pid}
+    )
+
+
+def cleanup_linux_adopted_processes(
+    baseline: dict[int, LinuxProcessIdentity], grace_seconds: float
+) -> None:
+    current = snapshot_linux_process_tree(os.getpid())
+    adopted = {
+        pid: identity
+        for pid, identity in current.items()
+        if pid != os.getpid()
+        and (
+            pid not in baseline
+            or baseline[pid].start_ticks != identity.start_ticks
+        )
+    }
+    if not adopted:
+        return
+    print(
+        "[CI-WATCHDOG] test command exited with adopted descendants; "
+        "terminating this command's remaining process tree.",
+        flush=True,
+    )
+    terminate_linux_processes(adopted, grace_seconds)
+    reap_linux_zombie_children(adopted)
 
 
 def terminate_other_posix_process_tree(
@@ -225,13 +300,17 @@ def run_command(
     if timeout_seconds <= 0 or grace_seconds <= 0:
         raise ValueError("CI timeouts must be positive")
     options: dict[str, object] = {}
+    baseline_linux_processes: dict[int, LinuxProcessIdentity] | None = None
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
+        if sys.platform.startswith("linux"):
+            enable_linux_child_subreaper()
+            baseline_linux_processes = snapshot_linux_process_tree(os.getpid())
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, **options)
     try:
-        return RunResult(process.wait(timeout=timeout_seconds), timed_out=False)
+        exit_code = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
         print(
             f"[CI-WATCHDOG] deadline {timeout_seconds:g}s exceeded; "
@@ -244,6 +323,13 @@ def run_command(
             print(f"[CI-WATCHDOG] termination failure: {error}", flush=True)
             return RunResult(125, timed_out=True)
         return RunResult(124, timed_out=True)
+    if baseline_linux_processes is not None:
+        try:
+            cleanup_linux_adopted_processes(baseline_linux_processes, grace_seconds)
+        except RuntimeError as error:
+            print(f"[CI-WATCHDOG] normal-exit cleanup failure: {error}", flush=True)
+            return RunResult(125, timed_out=False)
+    return RunResult(exit_code, timed_out=False)
 
 
 def parse_arguments(argv: list[str]) -> tuple[float, float, list[str]]:
