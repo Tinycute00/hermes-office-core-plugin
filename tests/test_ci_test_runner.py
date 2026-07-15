@@ -203,11 +203,20 @@ class CiTestRunnerCase(unittest.TestCase):
                 "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
                 "time.sleep(60)"
             )
-            parent_program = (
-                "import subprocess, sys; "
-                "subprocess.Popen([sys.executable, '-c', sys.argv[2], sys.argv[1]], "
-                "start_new_session=True)"
-            )
+            parent_program = """
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[2], sys.argv[1]], start_new_session=True
+)
+deadline = time.monotonic() + 5
+while not Path(sys.argv[1]).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+raise SystemExit(0 if Path(sys.argv[1]).exists() else 1)
+"""
 
             pid: int | None = None
             try:
