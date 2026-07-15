@@ -198,6 +198,10 @@ class CiTestRunnerCase(unittest.TestCase):
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="office-os-ci-runner-") as directory:
             child_pid = Path(directory) / "normal-detached-child.pid"
+            baseline = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
             child_program = (
                 "from pathlib import Path; import os, sys, time; "
                 "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
@@ -247,11 +251,20 @@ raise SystemExit(0 if Path(sys.argv[1]).exists() else 1)
                 self.assertFalse(
                     process_exists(pid), f"orphaned normal-exit child PID {pid}"
                 )
+                self.assertTrue(
+                    process_exists(baseline.pid),
+                    f"normal-exit cleanup killed baseline child PID {baseline.pid}",
+                )
             finally:
                 if pid is None and child_pid.exists():
                     pid = int(child_pid.read_text(encoding="utf-8"))
                 if pid is not None:
                     terminate_test_process(pid)
+                terminate_test_process(baseline.pid)
+                try:
+                    baseline.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self.fail(f"baseline child PID {baseline.pid} did not exit")
 
     def test_other_posix_tree_kills_lingering_group_after_root_exits(self) -> None:
         runner = load_runner()
