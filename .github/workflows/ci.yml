@@ -19,44 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Capture Office OS test progress
+      - name: Run OfficeCLI shutdown diagnosis
         shell: bash
-        run: |
-          set -u
-          setsid python -u scripts/ci_test_runner.py --timeout-seconds 90 --grace-seconds 5 -- \
-            python -u -m unittest discover -s tests -v > ci-test.log 2>&1 &
-          test_pid=$!
-          for _ in $(seq 1 50); do
-            [ -r "/proc/$test_pid/stat" ] && break
-            sleep 0.1
-          done
-          [ -r "/proc/$test_pid/stat" ]
-          start_ticks=$(awk '{print $22}' "/proc/$test_pid/stat")
-          deadline=$((SECONDS + 120))
-          while [ "$SECONDS" -lt "$deadline" ] && [ -r "/proc/$test_pid/stat" ]; do
-            current_ticks=$(awk '{print $22}' "/proc/$test_pid/stat")
-            current_state=$(awk '{print $3}' "/proc/$test_pid/stat")
-            [ "$current_ticks" = "$start_ticks" ] && [ "$current_state" != Z ] || break
-            sleep 1
-          done
-          if [ -r "/proc/$test_pid/stat" ] && \
-             [ "$(awk '{print $22}' "/proc/$test_pid/stat")" = "$start_ticks" ]; then
-            printf '\n[diagnostic] terminating root pid=%s after bounded capture\n' "$test_pid" >> ci-test.log
-            kill -TERM "$test_pid" || true
-            sleep 5
-            if [ -r "/proc/$test_pid/stat" ] && \
-               [ "$(awk '{print $22}' "/proc/$test_pid/stat")" = "$start_ticks" ]; then
-              kill -KILL "$test_pid" || true
-            fi
-          fi
-          printf '\n[diagnostic] bounded root observation complete for pid=%s\n' "$test_pid" >> ci-test.log
-          exit 0
-      - name: Upload Office OS test progress
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux-test-progress
-          path: ci-test.log
-          if-no-files-found: error
-      - name: Mark diagnostic run incomplete
-        run: exit 1
+        run: python -u scripts/ci_test_runner.py --timeout-seconds 90 --grace-seconds 5 -- python -u -m unittest -v tests.test_officecli
