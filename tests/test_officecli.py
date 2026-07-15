@@ -191,7 +191,7 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
         "process.stdin.on('end',async()=>{note('input-end');const c=JSON.parse(input);note('parsed');try{"
         "if(c.nonsettlingKill){const {EventEmitter}=require('node:events');"
         "const childProcess=require('node:child_process');let launches=0;"
-        "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++launches;"
+        "childProcess.spawn=()=>{const child=new EventEmitter();launches+=1;"
         "if(launches===1){child.stdout=new EventEmitter();child.stderr=new EventEmitter();}return child;};"
         "const runner=require(process.argv[1]);try{await runner.runProcess('fake',[],1,25);"
         "process.stdout.write(JSON.stringify({error:'settled'}));}catch(error){"
