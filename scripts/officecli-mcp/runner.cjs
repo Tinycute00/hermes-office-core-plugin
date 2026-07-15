@@ -105,6 +105,10 @@ function samePath(left, right) {
     : left === right;
 }
 
+function canonicalExistingPath(target) {
+  return fs.realpathSync.native(path.resolve(target));
+}
+
 function canonicalAuthorizedRun(authority) {
   if (!authority || typeof authority !== "object" || typeof authority.runDirectory !== "string" || typeof authority.candidate !== "string") {
     throw new RunnerError("Authorized Core candidate run is invalid.");
@@ -115,9 +119,7 @@ function canonicalAuthorizedRun(authority) {
   if (!rootStatus.isDirectory() || isLinklike(root, rootStatus)) throw new RunnerError("Candidate root is linked or invalid.");
   const lexicalRun = path.resolve(authority.runDirectory);
   const lexicalCandidate = path.resolve(authority.candidate);
-  if (!isContained(root, lexicalRun) || !isContained(lexicalRun, lexicalCandidate) || !/^[0-9a-f]{32}$/.test(path.basename(lexicalRun))) {
-    throw new RunnerError("Authorized Core candidate run is outside managed staging.");
-  }
+  if (linkedAncestor(lexicalRun) || linkedAncestor(lexicalCandidate)) throw new RunnerError("Authorized Core candidate run is linked or invalid.");
   const runStatus = fs.lstatSync(lexicalRun);
   const candidateStatus = fs.lstatSync(lexicalCandidate);
   if (
@@ -129,10 +131,10 @@ function canonicalAuthorizedRun(authority) {
   ) {
     throw new RunnerError("Authorized Core candidate run is linked or invalid.");
   }
-  const canonicalRoot = fs.realpathSync.native(root);
-  const canonicalRun = fs.realpathSync.native(lexicalRun);
-  const canonicalCandidate = fs.realpathSync.native(lexicalCandidate);
-  if (!samePath(path.dirname(canonicalRun), canonicalRoot) || !isContained(canonicalRun, canonicalCandidate)) {
+  const canonicalRoot = canonicalExistingPath(root);
+  const canonicalRun = canonicalExistingPath(lexicalRun);
+  const canonicalCandidate = canonicalExistingPath(lexicalCandidate);
+  if (!samePath(path.dirname(canonicalRun), canonicalRoot) || !isContained(canonicalRun, canonicalCandidate) || !/^[0-9a-f]{32}$/.test(path.basename(canonicalRun))) {
     throw new RunnerError("Authorized Core candidate run escapes managed staging.");
   }
   return { candidate: canonicalCandidate, runDirectory: canonicalRun };

@@ -38,7 +38,10 @@ def _absolute_path(value: str | Path) -> Path:
 
 
 def _same_path(left: Path, right: Path) -> bool:
-    return os.path.normcase(os.fspath(left)) == os.path.normcase(os.fspath(right))
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(os.fspath(left)) == os.path.normcase(os.fspath(right))
 
 
 def _has_linklike_ancestor(path: Path) -> bool:
@@ -94,11 +97,14 @@ def reserve_candidate_directory(data_root: Path, run_id: str) -> Path:
                 f"Managed candidate run directory could not be created: {error}"
             ) from error
     resolved = directory.resolve(strict=True)
-    if resolved.parent != root:
+    if not _same_path(resolved.parent, root):
         raise CandidateLifecycleError(
             "Managed OfficeCLI candidate run directory escapes staging."
         )
-    return resolved
+    # Keep the long hook-injected parent in persisted state.  The physical
+    # comparison above still detects a redirected directory, while callers do
+    # not inherit a Windows 8.3 alias from Path.resolve().
+    return directory
 
 
 def validated_active_run_directory(

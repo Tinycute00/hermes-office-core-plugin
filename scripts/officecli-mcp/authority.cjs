@@ -19,6 +19,10 @@ function samePath(left, right) {
     : left === right;
 }
 
+function canonicalExistingPath(target) {
+  return fs.realpathSync.native(path.resolve(target));
+}
+
 function lstatOrNull(target) {
   try {
     return fs.lstatSync(target);
@@ -122,14 +126,29 @@ function describeRun(candidate) {
   const root = candidateRoot();
   const dataRoot = path.dirname(root);
   const lexicalCandidate = path.resolve(candidate);
-  if (!isContained(root, lexicalCandidate)) {
+  let canonicalRoot;
+  let canonicalCandidate;
+  try {
+    canonicalRoot = canonicalExistingPath(root);
+    canonicalCandidate = canonicalExistingPath(lexicalCandidate);
+  } catch {
     throw new CoreRunAuthorityError("Candidate is outside the managed candidate root.");
   }
-  const [runId] = path.relative(root, lexicalCandidate).split(path.sep);
+  if (!isContained(canonicalRoot, canonicalCandidate)) {
+    throw new CoreRunAuthorityError("Candidate is outside the managed candidate root.");
+  }
+  const [runId] = path.relative(canonicalRoot, canonicalCandidate).split(path.sep);
   if (!RUN_ID.test(runId || "")) {
     throw new CoreRunAuthorityError("Candidate has no Core-owned direct run directory.");
   }
-  return { candidate: lexicalCandidate, dataRoot, root, runDirectory: path.join(root, runId), runId };
+  return {
+    candidate: canonicalCandidate,
+    dataRoot,
+    lexicalCandidate,
+    root,
+    runDirectory: path.join(root, runId),
+    runId,
+  };
 }
 
 function directRunDirectory(run, inspector) {
@@ -138,9 +157,14 @@ function directRunDirectory(run, inspector) {
   assertRegularDirectory(run.root, "Candidate root", inspector);
   const lexicalRun = run.runDirectory;
   assertRegularDirectory(lexicalRun, "Core candidate run directory", inspector);
-  const canonicalRoot = fs.realpathSync.native(run.root);
-  const canonicalRun = fs.realpathSync.native(lexicalRun);
-  const canonicalCandidate = fs.realpathSync.native(run.candidate);
+  assertUnlinkedAncestors(run.lexicalCandidate, inspector, "Core candidate path is linked or invalid.");
+  const candidateStatus = lstatOrNull(run.lexicalCandidate);
+  if (!candidateStatus || inspector.isLinklike(run.lexicalCandidate, candidateStatus) || !candidateStatus.isFile() || candidateStatus.nlink > 1) {
+    throw new CoreRunAuthorityError("Core candidate is linked, missing, or invalid.");
+  }
+  const canonicalRoot = canonicalExistingPath(run.root);
+  const canonicalRun = canonicalExistingPath(lexicalRun);
+  const canonicalCandidate = canonicalExistingPath(run.lexicalCandidate);
   if (!samePath(path.dirname(canonicalRun), canonicalRoot) || !isContained(canonicalRun, canonicalCandidate)) {
     throw new CoreRunAuthorityError("Core candidate run directory escapes staging.");
   }
@@ -156,7 +180,11 @@ function matchingState(state, run) {
   if (typeof state.candidate_directory !== "string" || !path.isAbsolute(state.candidate_directory)) {
     return false;
   }
-  return samePath(path.resolve(state.candidate_directory), run.runDirectory);
+  try {
+    return samePath(canonicalExistingPath(state.candidate_directory), run.runDirectory);
+  } catch {
+    return false;
+  }
 }
 
 function assertMatchingState(state, run, inspector) {
@@ -167,8 +195,9 @@ function assertMatchingState(state, run, inspector) {
     throw new CoreRunAuthorityError("Matching Core run state has an invalid candidate directory.");
   }
   const lexical = path.resolve(state.candidate_directory);
+  assertUnlinkedAncestors(lexical, inspector, "Matching Core candidate run directory is linked or invalid.");
   assertRegularDirectory(lexical, "Matching Core candidate run directory", inspector);
-  const canonical = fs.realpathSync.native(lexical);
+  const canonical = canonicalExistingPath(lexical);
   if (!samePath(canonical, run.runDirectory)) {
     throw new CoreRunAuthorityError("Matching Core run state does not own this candidate directory.");
   }
@@ -195,6 +224,7 @@ function authorizeMutation(candidate, fileCandidates = []) {
     primary.root,
     workspaces,
     ...describedRuns.map((described) => described.runDirectory),
+    ...describedRuns.flatMap((described) => existingAncestors(described.lexicalCandidate).map(([item]) => item)),
   ]);
   const run = directRunDirectory(primary, inspector);
   assertUnlinkedAncestors(workspaces, inspector, "Core workspace state path is linked or invalid.");

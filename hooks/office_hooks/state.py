@@ -60,7 +60,13 @@ def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA")
     if not configured:
         raise HookStateError("Office OS requires the plugin-owned PLUGIN_DATA value.")
-    return Path(os.path.abspath(configured))
+    if not os.path.isabs(configured):
+        raise HookStateError("Office OS requires an absolute plugin-owned PLUGIN_DATA value.")
+    # Keep the hook-injected spelling for user-visible context.  On Windows,
+    # abspath()/GetFullPathName() can silently turn C:\\Users\\runneradmin into
+    # its 8.3 alias, which would violate the exact-root contract even though it
+    # reaches the same directory.
+    return Path(os.path.normpath(configured))
 
 
 def plugin_root() -> Path:

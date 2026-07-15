@@ -206,7 +206,11 @@ def plugin_data_root() -> Path:
     configured = os.environ.get("PLUGIN_DATA")
     if not configured:
         raise OfficeOSError("Office OS requires the hook-injected PLUGIN_DATA value.")
-    return Path(os.path.abspath(configured))
+    if not os.path.isabs(configured):
+        raise OfficeOSError("Office OS requires an absolute hook-injected PLUGIN_DATA value.")
+    # Preserve the hook's authoritative spelling.  Windows path expansion can
+    # otherwise replace a long user-directory component with an 8.3 alias.
+    return Path(os.path.normpath(configured))
 
 
 def validate_plugin_data_ancestors(root: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # noqa: SIZE_OK - plan-mandated consolidated integration suite for one OfficeCLI surface.
 
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -29,6 +30,16 @@ CANDIDATE_RUNS = (
     ROOT / "skills" / "office-os" / "scripts" / "office_candidate_runs.py"
 )
 NODE = shutil.which("node")
+
+
+def short_windows_path(path: Path) -> Path:
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(
+        os.fspath(path), buffer, len(buffer)
+    )
+    if not length:
+        raise OfficeCLITestSetupError("Windows did not provide a short path for fixture.")
+    return Path(buffer.value)
 
 
 class OfficeCLITestSetupError(RuntimeError):
@@ -284,7 +295,7 @@ class OfficeCLICase(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "tools/call",
-                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate), "--json"]}},
+                    "params": {"name": "officecli", "arguments": {"command": ["validate", os.fspath(candidate)]}},
                 },
             ]
             payload = b"\n".join(json.dumps(message).encode() for message in messages) + b"\n"
@@ -332,6 +343,190 @@ class OfficeCLICase(unittest.TestCase):
             self.assertTrue(responses[1]["result"]["isError"])
             self.assertIn("checksum mismatch", responses[1]["result"]["content"][0]["text"])
             self.assertFalse(capture.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_authorizer_accepts_short_alias_for_confirmed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            run_id = "a" * 32
+            run_directory = data_root / "officecli-candidates" / run_id
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            workspace = data_root / "workspaces" / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "run_state.json").write_text(
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "candidate_directory": os.fspath(short_windows_path(run_directory)),
+                        "proposal_confirmed": True,
+                        "status": "executing",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            short_candidate = short_windows_path(candidate)
+            if os.path.normcase(os.fspath(short_candidate)) == os.path.normcase(
+                os.fspath(candidate)
+            ):
+                self.skipTest("fixture path has no distinct Windows short alias")
+
+            result = run_authorizer(short_candidate, data_root)
+            self.assertNotIn("error", result)
+            self.assertTrue(os.path.samefile(result["run"]["candidate"], candidate))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_authorizer_short_alias_still_requires_direct_active_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            run_id = "d" * 32
+            run_directory = data_root / "officecli-candidates" / run_id
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            short_candidate = short_windows_path(candidate)
+            if os.path.normcase(os.fspath(short_candidate)) == os.path.normcase(
+                os.fspath(candidate)
+            ):
+                self.skipTest("fixture path has no distinct Windows short alias")
+            workspace = data_root / "workspaces" / "workspace"
+            workspace.mkdir(parents=True)
+            state_path = workspace / "run_state.json"
+
+            for label, confirmed, status in (
+                ("unconfirmed", False, "executing"),
+                ("stale", True, "completed"),
+            ):
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "run_id": run_id,
+                            "candidate_directory": os.fspath(short_windows_path(run_directory)),
+                            "proposal_confirmed": confirmed,
+                            "status": status,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with self.subTest(label=label):
+                    self.assertIn("error", run_authorizer(short_candidate, data_root))
+
+            non_direct = data_root / "officecli-candidates" / "not-a-run" / "candidate.xlsx"
+            non_direct.parent.mkdir()
+            non_direct.write_bytes(b"candidate")
+            self.assertIn("error", run_authorizer(short_windows_path(non_direct), data_root))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_policy_accepts_short_alias_for_managed_candidate(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate = data_root / "officecli-candidates" / ("b" * 32) / "candidate.xlsx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"candidate")
+            short_candidate = short_windows_path(candidate)
+            if os.path.normcase(os.fspath(short_candidate)) == os.path.normcase(
+                os.fspath(candidate)
+            ):
+                self.skipTest("fixture path has no distinct Windows short alias")
+
+            parsed = run_policy(
+                {"command": ["validate", os.fspath(short_candidate)]}, data_root
+            )
+            self.assertEqual(parsed["argv"][0], "validate")
+            self.assertTrue(os.path.samefile(parsed["argv"][1], candidate))
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_runner_cleans_with_short_authority_aliases(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            run_directory = data_root / "officecli-candidates" / ("c" * 32)
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            short_run = short_windows_path(run_directory)
+            short_candidate = short_windows_path(candidate)
+            if os.path.normcase(os.fspath(short_run)) == os.path.normcase(
+                os.fspath(run_directory)
+            ):
+                self.skipTest("fixture path has no distinct Windows short alias")
+            overflow = (
+                "const fs=require('node:fs');const path=require('node:path');"
+                "for(let index=0;index<32;index+=1)fs.writeFileSync(path.join(process.argv[1],`overflow-${index}.tmp`),'x');"
+            )
+
+            result = run_runner(
+                {
+                    "parsed": {
+                        "argv": ["-e", overflow, os.fspath(run_directory)],
+                        "screenshot": False,
+                    },
+                    "options": {
+                        "authority": {
+                            "candidate": os.fspath(short_candidate),
+                            "runDirectory": os.fspath(short_run),
+                        }
+                    },
+                },
+                data_root,
+            )
+
+            self.assertFalse(result.get("isError", False), result)
+            self.assertEqual(list(run_directory.glob("overflow-*.tmp")), [])
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_short_alias_does_not_relax_candidate_containment(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            candidate_root.mkdir(parents=True)
+            outside = base / "outside"
+            outside.mkdir()
+            outside_file = outside / "sentinel.xlsx"
+            outside_file.write_bytes(b"outside")
+            hard_link = candidate_root / "hard-link.xlsx"
+            os.link(outside_file, hard_link)
+            junction = candidate_root / "linked"
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", os.fspath(junction), os.fspath(outside)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+            try:
+                short_base = short_windows_path(base)
+                short_root = short_windows_path(candidate_root)
+                cases = {
+                    "outside": short_base / outside.name / outside_file.name,
+                    "hard-link": short_root / hard_link.name,
+                    "junction": short_root / junction.name / outside_file.name,
+                }
+                if all(
+                    os.path.normcase(os.fspath(alias))
+                    == os.path.normcase(os.fspath(original))
+                    for alias, original in (
+                        (cases["outside"], outside_file),
+                        (cases["hard-link"], hard_link),
+                        (cases["junction"], junction / outside_file.name),
+                    )
+                ):
+                    self.skipTest("fixture paths have no distinct Windows short aliases")
+                for label, alias in cases.items():
+                    with self.subTest(label=label):
+                        result = run_policy(
+                            {"command": ["validate", os.fspath(alias)]}, data_root
+                        )
+                        self.assertIn("error", result)
+                self.assertEqual(outside_file.read_bytes(), b"outside")
+            finally:
+                if os.path.lexists(junction):
+                    os.rmdir(junction)
 
     def test_mutations_require_confirmed_matching_core_run_state(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:

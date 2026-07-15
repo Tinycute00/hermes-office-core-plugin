@@ -30,6 +30,7 @@ def load_session_module():
 
 
 session_module = load_session_module()
+state_module = importlib.import_module("office_hooks.state")
 
 
 def short_windows_path(path: Path) -> Path:
@@ -123,6 +124,23 @@ class SessionContextHookTest(unittest.TestCase):
         self.assertIn(
             f"Authoritative Office OS PLUGIN_DATA is {self.plugin_data}.", context
         )
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_plugin_data_root_never_shortens_the_injected_path(self) -> None:
+        self.plugin_data.mkdir()
+        short_data = short_windows_path(self.plugin_data)
+        if os.path.normcase(os.fspath(short_data)) == os.path.normcase(
+            os.fspath(self.plugin_data)
+        ):
+            self.skipTest("fixture path has no distinct Windows short alias")
+        expected = Path(os.path.normpath(os.fspath(self.plugin_data)))
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            # Simulate the Windows path expansion that made the old abspath()
+            # implementation replace a long injected spelling with an 8.3 alias.
+            with mock.patch.object(
+                state_module.os.path, "abspath", return_value=os.fspath(short_data)
+            ):
+                self.assertEqual(state_module.plugin_data_root(), expected)
 
     def test_session_start_emits_only_compact_active_pointer_and_cleans_stale_temp(self) -> None:
         # Given: one active run plus stale, fresh, and unrelated workspace files.

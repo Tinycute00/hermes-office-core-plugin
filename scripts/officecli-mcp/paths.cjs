@@ -25,6 +25,10 @@ function isContained(root, target) {
   return relative !== "" && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
 }
 
+function canonicalExistingPath(target) {
+  return fs.realpathSync.native(path.resolve(target));
+}
+
 function lstatOrNull(target) {
   try {
     return fs.lstatSync(target);
@@ -117,18 +121,36 @@ function resolveCandidatePath(input, options = {}) {
   const root = candidateRoot();
   const rootStatus = rejectLink(root);
   if (!rootStatus || !rootStatus.isDirectory()) throw new PathPolicyError("Candidate root is missing or invalid.");
-  const lexical = path.resolve(root, input);
-  if (!isContained(root, lexical)) throw new PathPolicyError("Path escapes the managed candidate root.");
+  let lexical = path.resolve(root, input);
+  let containmentRoot = root;
   let existing = lexical;
   let status = lstatOrNull(existing);
-  while (!status && isContained(root, existing)) {
+  if (!isContained(containmentRoot, lexical)) {
+    // A Core state may legitimately carry a Windows 8.3 spelling while the
+    // hook-injected root uses the long spelling.  Only accept that case after
+    // the actual existing path is independently link-checked and proves to be
+    // physically contained in the managed root.
+    if (!status || linkedAncestor(lexical)) {
+      throw new PathPolicyError("Path escapes the managed candidate root.");
+    }
+    const canonicalRoot = canonicalExistingPath(root);
+    const canonicalCandidate = canonicalExistingPath(lexical);
+    if (!isContained(canonicalRoot, canonicalCandidate)) {
+      throw new PathPolicyError("Path escapes the managed candidate root.");
+    }
+    containmentRoot = canonicalRoot;
+    lexical = canonicalCandidate;
+    existing = lexical;
+    status = lstatOrNull(existing);
+  }
+  while (!status && isContained(containmentRoot, existing)) {
     existing = path.dirname(existing);
     status = lstatOrNull(existing);
   }
   if (!status) throw new PathPolicyError("Candidate path has no contained existing parent.");
-  const componentStatuses = validateExistingComponents(root, existing);
-  const realData = fs.realpathSync.native(data);
-  const realRoot = fs.realpathSync.native(root);
+  const componentStatuses = validateExistingComponents(containmentRoot, existing);
+  const realData = canonicalExistingPath(data);
+  const realRoot = canonicalExistingPath(root);
   if (!isContained(realData, realRoot)) throw new PathPolicyError("Candidate root escapes plugin data.");
   const realExisting = fs.realpathSync.native(existing);
   if (realExisting !== realRoot && !isContained(realRoot, realExisting)) {

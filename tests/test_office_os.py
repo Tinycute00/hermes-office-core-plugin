@@ -495,7 +495,7 @@ class CoreCase(unittest.TestCase):
                 WHERE d.path = ?
                 GROUP BY d.id
                 """,
-                (os.path.normcase(os.fspath(document)),),
+                (os.path.normcase(os.fspath(module.canonical_path(document))),),
             ).fetchone()
         finally:
             database.close()
@@ -509,9 +509,10 @@ class CoreCase(unittest.TestCase):
         document = self.workspace / "short-name.docx"
         write_docx(document, "short-name")
         short = short_windows_path(document)
+        expected = Path(os.path.normpath(os.path.abspath(os.fspath(document))))
 
         with mock.patch.object(module.os.path, "realpath", return_value=os.fspath(short)):
-            self.assertEqual(module.canonical_path(document), document)
+            self.assertEqual(module.canonical_path(document), expected)
 
     def test_knowledge_map_retention_caps_documents_chunks_and_text(self) -> None:
         module = load_core_module()
@@ -2475,7 +2476,7 @@ class CoreCase(unittest.TestCase):
         self.assertIn("synthetic cleanup failure", result["candidate_cleanup_error"])
         self.assertTrue(Path(result["target"]).is_file())
         state = json.loads((directory / "run_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["candidate"], os.fspath(candidate))
+        self.assertEqual(state["candidate"], os.fspath(module.canonical_path(candidate)))
         self.assertIsNotNone(state["candidate_directory"])
         self.run_core("complete", "--summary", "published with deferred cleanup")
 

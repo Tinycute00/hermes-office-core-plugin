@@ -483,7 +483,7 @@ class ContractCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             data_root = base / "plugin-data"
-            expected_data_root = data_root.resolve()
+            expected_data_root = os.path.normpath(os.fspath(data_root))
             workspace = base / "workspace"
             workspace.mkdir()
             environment = os.environ.copy()
