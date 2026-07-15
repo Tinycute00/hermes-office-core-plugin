@@ -230,10 +230,15 @@ class CiTestRunnerCase(unittest.TestCase):
         with mock.patch.object(
             runner.os, "killpg", side_effect=ProcessLookupError, create=True
         ) as killpg:
+            calls = mock.Mock()
+            calls.attach_mock(process.poll, "poll")
+            calls.attach_mock(killpg, "killpg")
             self.assertTrue(runner.wait_for_posix_process_group_exit(process, 1.0))
 
-        process.poll.assert_called()
-        killpg.assert_called_once_with(process.pid, 0)
+        self.assertEqual(
+            calls.mock_calls,
+            [mock.call.poll(), mock.call.killpg(process.pid, 0)],
+        )
 
     def test_normal_exit_is_returned_without_timeout(self) -> None:
         runner = load_runner()
