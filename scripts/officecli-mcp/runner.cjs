@@ -185,6 +185,31 @@ function pngCrc(data) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
+function waitForProcessGroupExit(processGroupId, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const check = () => {
+      try {
+        process.kill(-processGroupId, 0);
+      } catch (error) {
+        if (error.code === "ESRCH") {
+          resolve(true);
+          return;
+        }
+        resolve(false);
+        return;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        resolve(false);
+        return;
+      }
+      setTimeout(check, Math.min(25, remaining));
+    };
+    check();
+  });
+}
+
 function killTree(child, timeoutMs) {
   if (!child.pid) return Promise.resolve(false);
   if (process.platform === "win32") {
@@ -208,12 +233,12 @@ function killTree(child, timeoutMs) {
   }
   try {
     process.kill(-child.pid, "SIGKILL");
-    return Promise.resolve(true);
+    return waitForProcessGroupExit(child.pid, timeoutMs);
   } catch (error) {
     if (error.code === "ESRCH") return Promise.resolve(true);
     try {
       child.kill("SIGKILL");
-      return Promise.resolve(true);
+      return Promise.resolve(false);
     } catch {
       return Promise.resolve(false);
     }
