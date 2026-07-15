@@ -937,10 +937,13 @@ class OfficeCLICase(unittest.TestCase):
             candidate = candidate_root / "candidate.xlsx"
             candidate.write_bytes(b"candidate")
             capture = base / "termination-counts.json"
+            # Do not synthesize a PID here. On Unix, runner cleanup treats a
+            # PID as a process-group leader; a fake first PID of 1 could
+            # otherwise signal an unrelated CI process group.
             script = (
                 "const fs=require('node:fs');const {EventEmitter}=require('node:events');"
                 "const childProcess=require('node:child_process');let spawns=0,executions=0;"
-                "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++spawns;"
+                "childProcess.spawn=()=>{const child=new EventEmitter();spawns+=1;"
                 "child.stdout=new EventEmitter();child.stderr=new EventEmitter();return child;};"
                 "const adapter=require(process.argv[1]);const runner=require(process.argv[2]);"
                 "process.on('beforeExit',()=>fs.writeFileSync(process.argv[3],JSON.stringify({spawns,executions})));"
