@@ -1118,7 +1118,8 @@ class OfficeCLICase(unittest.TestCase):
                     },
                     data_root,
                 )
-                self.assertTrue(result["isError"])
+                self.assertNotIn("error", result, result)
+                self.assertTrue(result.get("isError", False), result)
                 self.assertLess(len(result["content"][0]["text"]), 20_000)
                 pid = int(pid_file.read_text(encoding="utf-8"))
                 self.assertFalse(process_exists(pid), f"grandchild {pid} survived {mode}")
@@ -1229,7 +1230,8 @@ class OfficeCLICase(unittest.TestCase):
                 },
                 data_root,
             )
-            self.assertTrue(result["isError"])
+            self.assertNotIn("error", result, result)
+            self.assertTrue(result.get("isError", False), result)
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertFalse(marker.exists())
 
