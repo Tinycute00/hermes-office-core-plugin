@@ -99,6 +99,21 @@ def wait_for_linux_processes_exit(
         time.sleep(min(0.05, remaining))
 
 
+def wait_for_posix_process_group_exit(
+    process_group: int, timeout_seconds: float
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            os.killpg(process_group, 0)
+        except ProcessLookupError:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
 def signal_linux_process_tree(
     identities: dict[int, LinuxProcessIdentity], signal_number: int
 ) -> None:
@@ -164,11 +179,15 @@ def terminate_other_posix_process_tree(
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    if wait_for_process_exit(process, grace_seconds):
+    if wait_for_posix_process_group_exit(process.pid, grace_seconds):
+        if not wait_for_process_exit(process, grace_seconds):
+            raise RuntimeError("SIGTERM did not reap the timed-out test process.")
         return
     os.killpg(process.pid, signal.SIGKILL)
-    if not wait_for_process_exit(process, grace_seconds):
+    if not wait_for_posix_process_group_exit(process.pid, grace_seconds):
         raise RuntimeError("SIGKILL did not terminate the timed-out test tree.")
+    if not wait_for_process_exit(process, grace_seconds):
+        raise RuntimeError("SIGKILL did not reap the timed-out test process.")
 
 
 def terminate_process_tree(process: subprocess.Popen[object], grace_seconds: float) -> None:

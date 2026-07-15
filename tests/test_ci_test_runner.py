@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,7 +145,7 @@ class CiTestRunnerCase(unittest.TestCase):
                 if pid is not None:
                     terminate_test_process(pid)
 
-    @unittest.skipIf(os.name == "nt", "requires POSIX process groups")
+    @unittest.skipUnless(sys.platform.startswith("linux"), "requires Linux /proc")
     def test_posix_detached_child_is_terminated_after_timeout(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory(prefix="office-os-ci-runner-") as directory:
@@ -191,6 +192,35 @@ class CiTestRunnerCase(unittest.TestCase):
                     pid = int(child_pid.read_text(encoding="utf-8"))
                 if pid is not None:
                     terminate_test_process(pid)
+
+    def test_other_posix_tree_kills_lingering_group_after_root_exits(self) -> None:
+        runner = load_runner()
+        process = mock.Mock()
+        process.pid = 4242
+        process.poll.return_value = 0
+        signal_term = runner.signal.SIGTERM
+        signal_kill = 9
+        with (
+            mock.patch.object(runner.os, "killpg", create=True) as killpg,
+            mock.patch.object(runner.signal, "SIGKILL", signal_kill, create=True),
+            mock.patch.object(
+                runner,
+                "wait_for_posix_process_group_exit",
+                side_effect=[False, True],
+                create=True,
+            ) as wait_for_group,
+            mock.patch.object(runner, "wait_for_process_exit", return_value=True),
+        ):
+            runner.terminate_other_posix_process_tree(process, grace_seconds=1.0)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(process.pid, signal_term),
+                mock.call(process.pid, signal_kill),
+            ],
+        )
+        self.assertEqual(wait_for_group.call_count, 2)
 
     def test_normal_exit_is_returned_without_timeout(self) -> None:
         runner = load_runner()
