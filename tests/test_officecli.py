@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -206,17 +207,27 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     )
     environment = os.environ.copy()
     environment["PLUGIN_DATA"] = os.fspath(data_root)
-    completed = subprocess.run(
-        [NODE or "node", "-e", script, os.fspath(RUNNER)],
-        cwd=ROOT,
-        env=environment,
-        input=json.dumps(configuration),
-        text=True,
-        encoding="utf-8",
-        capture_output=True,
-        check=False,
-        timeout=2 if configuration.get("nonsettlingKill") else 15,
-    )
+    diagnostic = configuration.get("diagnostic")
+    timer = None
+    if isinstance(diagnostic, str):
+        timer = threading.Timer(5, print_test_descendants, args=(diagnostic,))
+        timer.daemon = True
+        timer.start()
+    try:
+        completed = subprocess.run(
+            [NODE or "node", "-e", script, os.fspath(RUNNER)],
+            cwd=ROOT,
+            env=environment,
+            input=json.dumps(configuration),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+            timeout=2 if configuration.get("nonsettlingKill") else 15,
+        )
+    finally:
+        if timer is not None:
+            timer.cancel()
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
     return json.loads(completed.stdout)
@@ -260,6 +271,47 @@ def print_subreaper_children(phase: str) -> None:
     print(
         f"[CI-DIAG] runner-tree phase={phase} subreaper={parent} "
         f"children={','.join(states) or '-'}",
+        flush=True,
+    )
+
+
+def print_test_descendants(phase: str) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    completed = subprocess.run(
+        ["ps", "-eo", "pid=,ppid=,pgid=,sid=,stat=,comm="],
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
+    identities: dict[int, tuple[int, str]] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) < 6:
+            continue
+        try:
+            identities[int(fields[0])] = (int(fields[1]), " ".join(fields[2:]))
+        except ValueError:
+            continue
+    descendants = {os.getpid()}
+    while True:
+        additions = {
+            pid
+            for pid, (parent, _details) in identities.items()
+            if parent in descendants and pid not in descendants
+        }
+        if not additions:
+            break
+        descendants.update(additions)
+    details = [
+        f"{pid}:{identities[pid][1]}"
+        for pid in sorted(descendants)
+        if pid in identities
+    ]
+    print(
+        f"[CI-DIAG] runner-wrapper phase={phase} "
+        f"descendants={' | '.join(details) or '-'}",
         flush=True,
     )
 
@@ -1315,7 +1367,8 @@ class OfficeCLICase(unittest.TestCase):
                     "parsed": {
                         "argv": ["-e", grow, os.fspath(candidate_root)],
                         "screenshot": False,
-                    }
+                    },
+                    "diagnostic": "quota-growth",
                 },
                 data_root,
             )
