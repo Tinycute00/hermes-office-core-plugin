@@ -183,8 +183,19 @@ def json_print(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def long_windows_path(value: str) -> str:
+    if os.name != "nt":
+        return value
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetLongPathNameW(value, buffer, len(buffer))
+    if not length or length >= len(buffer):
+        return value
+    return buffer.value
+
+
 def canonical_path(path: str | Path) -> Path:
-    return Path(os.path.realpath(os.path.abspath(os.fspath(path))))
+    resolved = os.path.realpath(os.path.abspath(os.fspath(path)))
+    return Path(long_windows_path(resolved))
 
 
 def canonical_workspace(cwd: str | Path | None = None) -> str:

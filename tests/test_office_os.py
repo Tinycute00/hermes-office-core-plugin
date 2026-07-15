@@ -1,6 +1,7 @@
 # noqa: SIZE_OK - Task 13 keeps one consolidated behavioral suite for the preserved Office core.
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import hashlib
 import json
@@ -177,6 +178,16 @@ def write_pptx(path: Path, text: str) -> None:
 def xlsx_text(path: Path) -> str:
     with zipfile.ZipFile(path) as package:
         return package.read("xl/worksheets/sheet1.xml").decode("utf-8")
+
+
+def short_windows_path(path: Path) -> Path:
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(
+        os.fspath(path), buffer, len(buffer)
+    )
+    if not length:
+        raise OfficeOSTestSetupError("Windows did not provide a short path for fixture.")
+    return Path(buffer.value)
 
 
 class CoreCase(unittest.TestCase):
@@ -491,6 +502,16 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(row[0], "error")
         self.assertIn("limit", row[1])
         self.assertEqual(row[2], 0)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_canonical_path_expands_windows_short_name(self) -> None:
+        module = load_core_module()
+        document = self.workspace / "short-name.docx"
+        write_docx(document, "short-name")
+        short = short_windows_path(document)
+
+        with mock.patch.object(module.os.path, "realpath", return_value=os.fspath(short)):
+            self.assertEqual(module.canonical_path(document), document)
 
     def test_knowledge_map_retention_caps_documents_chunks_and_text(self) -> None:
         module = load_core_module()
@@ -1833,6 +1854,96 @@ class CoreCase(unittest.TestCase):
         self.assertIn("hard", hardlink_result["error"])
         self.assertEqual(hashlib.sha256(outside.read_bytes()).hexdigest(), before)
         self.assertFalse((self.workspace / "Office OS Output").exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows extended paths")
+    def test_publish_accepts_extended_path_for_its_reserved_candidate_directory(
+        self,
+    ) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        begun = self.begin_publish_run("extended candidate path", (source,))
+        candidate = Path(begun["candidate_directory"]) / "candidate.xlsx"
+        write_xlsx(candidate, "candidate")
+        state_path = self.workspace_data() / "run_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["candidate_directory"] = "\\\\?\\" + state["candidate_directory"]
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        candidate = Path(state["candidate_directory"]) / "candidate.xlsx"
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "extended candidate path",
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(Path(result["target"]).is_file())
+        self.assertTrue(result["candidate_removed"])
+        self.assertFalse(candidate.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_publish_accepts_short_path_for_its_reserved_candidate_directory(
+        self,
+    ) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        begun = self.begin_publish_run("short candidate path", (source,))
+        candidate = Path(begun["candidate_directory"]) / "candidate.xlsx"
+        write_xlsx(candidate, "candidate")
+        state_path = self.workspace_data() / "run_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["candidate_directory"] = os.fspath(
+            short_windows_path(Path(state["candidate_directory"]))
+        )
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        candidate = Path(state["candidate_directory"]) / "candidate.xlsx"
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "short candidate path",
+        )
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(Path(result["target"]).is_file())
+        self.assertTrue(result["candidate_removed"])
+        self.assertFalse(candidate.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_publish_rejects_short_path_for_another_candidate_directory(self) -> None:
+        source = self.workspace / "source.xlsx"
+        write_xlsx(source, "source")
+        state = self.begin_publish_run("short outside candidate", (source,))
+        candidate = Path(state["candidate_directory"]) / "candidate.xlsx"
+        write_xlsx(candidate, "candidate")
+        outside = self.base / "outside-candidate-directory"
+        outside.mkdir()
+        state["candidate_directory"] = os.fspath(short_windows_path(outside))
+        (self.workspace_data() / "run_state.json").write_text(
+            json.dumps(state), encoding="utf-8"
+        )
+
+        result, _ = self.run_core(
+            "publish",
+            "--candidate",
+            os.fspath(candidate),
+            "--source",
+            os.fspath(source),
+            "--task",
+            "short outside candidate",
+            expected=2,
+        )
+
+        self.assertIn("reserved", result["error"])
+        self.assertTrue(candidate.is_file())
 
     def test_candidate_cleanup_fails_closed_on_semantically_invalid_active_state(self) -> None:
         source = self.workspace / "source.xlsx"

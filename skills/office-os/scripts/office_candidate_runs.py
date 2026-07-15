@@ -22,6 +22,32 @@ def _valid_run_id(run_id: str) -> bool:
     return len(run_id) == 32 and all(character in "0123456789abcdef" for character in run_id)
 
 
+def _strip_equivalent_windows_extended_prefix(value: str) -> str:
+    if os.name != "nt" or not value.startswith("\\\\?\\"):
+        return value
+    suffix = value[4:]
+    if len(suffix) >= 3 and suffix[1] == ":" and suffix[2] in "\\/":
+        return suffix
+    if suffix[:4].casefold() == "unc\\":
+        return "\\\\" + suffix[4:]
+    return value
+
+
+def _absolute_path(value: str | Path) -> Path:
+    return Path(_strip_equivalent_windows_extended_prefix(os.path.abspath(os.fspath(value))))
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.fspath(left)) == os.path.normcase(os.fspath(right))
+
+
+def _has_linklike_ancestor(path: Path) -> bool:
+    for component in (path, *path.parents):
+        if os.path.lexists(component) and is_linklike(component):
+            return True
+    return False
+
+
 def reserve_candidate_directory(data_root: Path, run_id: str) -> Path:
     if not _valid_run_id(run_id):
         raise CandidateLifecycleError("Managed candidate run identity is invalid.")
@@ -96,28 +122,34 @@ def validated_active_run_directory(
         raise CandidateLifecycleError(
             "Active run has no valid reserved candidate directory."
         )
-    lexical = Path(os.path.abspath(value))
-    expected = Path(os.path.abspath(os.fspath(candidate_root(data_root) / run_id)))
-    if os.path.normcase(os.fspath(lexical)) != os.path.normcase(os.fspath(expected)):
-        raise CandidateLifecycleError(
-            "Active run candidate directory is outside its reserved location."
-        )
+    lexical = _absolute_path(value)
+    expected = _absolute_path(candidate_root(data_root) / run_id)
     root = validated_root(data_root)
     if (
         root is None
         or not os.path.lexists(lexical)
         or is_linklike(lexical)
         or not lexical.is_dir()
+        or _has_linklike_ancestor(lexical)
+        or not os.path.lexists(expected)
+        or is_linklike(expected)
+        or not expected.is_dir()
+        or _has_linklike_ancestor(expected)
     ):
         raise CandidateLifecycleError(
             "Active run reserved candidate directory is linked, missing, or invalid."
         )
-    resolved = lexical.resolve(strict=True)
-    if resolved.parent != root:
+    resolved = _absolute_path(lexical.resolve(strict=True))
+    expected_resolved = _absolute_path(expected.resolve(strict=True))
+    if (
+        root is None
+        or not _same_path(resolved, expected_resolved)
+        or not _same_path(resolved.parent, _absolute_path(root))
+    ):
         raise CandidateLifecycleError(
             "Active run candidate directory is outside its reserved location."
         )
-    return resolved
+    return expected
 
 
 def validated_run_candidate(
@@ -128,20 +160,9 @@ def validated_run_candidate(
         raise CandidateLifecycleError(
             "Active run no longer has a reserved candidate directory."
         )
-    lexical = Path(os.path.abspath(os.fspath(value)))
-    try:
-        relative = lexical.relative_to(directory)
-    except ValueError:
-        raise CandidateLifecycleError(
-            "Candidate is outside the active run's reserved candidate directory."
-        ) from None
-    if relative == Path("."):
-        raise CandidateLifecycleError("Candidate must be an ordinary file.")
-    cursor = directory
-    for part in relative.parts:
-        cursor /= part
-        if os.path.lexists(cursor) and is_linklike(cursor):
-            raise CandidateLifecycleError("Candidate path contains a link or reparse point.")
+    lexical = _absolute_path(value)
+    if _has_linklike_ancestor(lexical):
+        raise CandidateLifecycleError("Candidate path contains a link or reparse point.")
     try:
         status = lexical.lstat()
     except OSError as error:
@@ -150,13 +171,23 @@ def validated_run_candidate(
         raise CandidateLifecycleError("Candidate must be an ordinary file.")
     if status.st_nlink > 1:
         raise CandidateLifecycleError("Candidate must not be hard linked.")
-    resolved = lexical.resolve(strict=True)
-    if not contained(directory, resolved):
+    resolved = _absolute_path(lexical.resolve(strict=True))
+    resolved_directory = _absolute_path(directory.resolve(strict=True))
+    if not contained(resolved_directory, resolved):
         raise CandidateLifecycleError(
             "Candidate is outside the active run's reserved candidate directory."
         )
+    relative = resolved.relative_to(resolved_directory)
+    if relative == Path("."):
+        raise CandidateLifecycleError("Candidate must be an ordinary file.")
+    candidate = directory.joinpath(*relative.parts)
+    cursor = directory
+    for part in relative.parts:
+        cursor /= part
+        if os.path.lexists(cursor) and is_linklike(cursor):
+            raise CandidateLifecycleError("Candidate path contains a link or reparse point.")
     assert_candidate_quota(data_root)
-    return resolved
+    return candidate
 
 
 def active_run_candidate_paths(
@@ -174,26 +205,32 @@ def active_run_candidate_paths(
 
 
 def remove_candidate_directory(data_root: Path, value: str | Path) -> bool:
-    lexical_root = candidate_root(data_root)
-    directory = Path(os.path.abspath(os.fspath(value)))
-    try:
-        relative = directory.relative_to(lexical_root)
-    except ValueError:
-        return False
-    if len(relative.parts) != 1:
-        return False
+    directory = _absolute_path(value)
     root = validated_root(data_root)
     if root is None or not os.path.lexists(directory):
         return False
     if is_linklike(directory):
+        try:
+            parent = _absolute_path(directory.parent.resolve(strict=True))
+        except OSError:
+            return False
+        if _has_linklike_ancestor(directory.parent) or not _same_path(
+            parent, _absolute_path(root)
+        ):
+            return False
         remove_link_entry(directory)
         return True
     if not directory.is_dir():
         raise CandidateLifecycleError(
             "Managed OfficeCLI candidate run directory is invalid."
         )
-    resolved = directory.resolve(strict=True)
-    if resolved.parent != root or not contained(root, resolved):
+    if _has_linklike_ancestor(directory):
+        raise CandidateLifecycleError(
+            "Managed OfficeCLI candidate run directory is linked or invalid."
+        )
+    resolved = _absolute_path(directory.resolve(strict=True))
+    resolved_root = _absolute_path(root)
+    if not _same_path(resolved.parent, resolved_root) or not contained(resolved_root, resolved):
         raise CandidateLifecycleError(
             "Managed OfficeCLI candidate run directory escapes staging."
         )

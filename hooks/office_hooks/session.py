@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from office_hooks.protocol import context_output, emit, plugin_data_context
-from office_hooks.state import ACTIVE_STATUSES, workspace_dir
+from office_hooks.state import ACTIVE_STATUSES, plugin_data_root, workspace_dir
 from office_hooks.storage import cleanup_stale_temps, read_json
 
 
@@ -21,7 +21,7 @@ def handle_session_start(payload: dict[str, Any], directory: Path) -> None:
         "Office OS is available as $office-os for local Excel, Word, "
         "PowerPoint, PDF, and cross-file work. Reclassify the current turn; "
         "the first visible Office response must begin with an intent classification; named-source replies use the Chinese intent envelope."
-        + plugin_data_context(directory.parents[1])
+        + plugin_data_context(plugin_data_root())
     )
     if active:
         context += (

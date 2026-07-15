@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -8,10 +10,36 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSION_CONTEXT_HOOK = ROOT / "hooks" / "session_context_hook.py"
+
+
+def load_session_module():
+    hooks_root = os.fspath(ROOT / "hooks")
+    inserted = hooks_root not in sys.path
+    if inserted:
+        sys.path.insert(0, hooks_root)
+    try:
+        return importlib.import_module("office_hooks.session")
+    finally:
+        if inserted:
+            sys.path.remove(hooks_root)
+
+
+session_module = load_session_module()
+
+
+def short_windows_path(path: Path) -> Path:
+    buffer = ctypes.create_unicode_buffer(32_768)
+    length = ctypes.windll.kernel32.GetShortPathNameW(
+        os.fspath(path), buffer, len(buffer)
+    )
+    if not length:
+        raise RuntimeError("Windows did not provide a short path for fixture.")
+    return Path(buffer.value)
 
 
 class SessionContextHookTest(unittest.TestCase):
@@ -76,6 +104,25 @@ class SessionContextHookTest(unittest.TestCase):
         self.assertEqual(completed.stdout, json.dumps(expected, separators=(",", ":")) + "\n")
         self.assertEqual(completed.stderr, "")
         self.assertFalse(self.plugin_data.exists())
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows short paths")
+    def test_session_context_preserves_configured_long_plugin_data_path(self) -> None:
+        directory = self.workspace_data()
+        short_directory = short_windows_path(directory)
+        captured: list[dict] = []
+        with mock.patch.dict(os.environ, {"PLUGIN_DATA": os.fspath(self.plugin_data)}):
+            with mock.patch.object(session_module, "workspace_dir", return_value=short_directory):
+                with mock.patch.object(session_module, "cleanup_stale_temps"):
+                    with mock.patch.object(session_module, "read_json", return_value={}):
+                        with mock.patch.object(session_module, "emit", side_effect=captured.append):
+                            session_module.handle_session_context(
+                                {"hook_event_name": "SessionStart", "cwd": os.fspath(self.workspace)}
+                            )
+
+        context = captured[0]["hookSpecificOutput"]["additionalContext"]
+        self.assertIn(
+            f"Authoritative Office OS PLUGIN_DATA is {self.plugin_data}.", context
+        )
 
     def test_session_start_emits_only_compact_active_pointer_and_cleans_stale_temp(self) -> None:
         # Given: one active run plus stale, fresh, and unrelated workspace files.

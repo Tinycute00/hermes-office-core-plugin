@@ -7,6 +7,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
 if ($PluginRoot) { $env:PLUGIN_ROOT = $PluginRoot }
 if ($PluginData) { $env:PLUGIN_DATA = $PluginData }
 if ($ManagedMarker) {
