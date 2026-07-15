@@ -1,6 +1,6 @@
 {
   "name": "office-os",
-  "version": "0.3.0+codex.20260715044403",
+  "version": "0.3.0+codex.20260715152023",
   "description": "Local-first Office workflows with immutable sources, managed candidate editing, bounded publishing, and optional recurrence.",
   "author": {
     "name": "Tinycute00",
