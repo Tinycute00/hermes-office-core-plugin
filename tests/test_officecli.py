@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1111,7 +1112,20 @@ class OfficeCLICase(unittest.TestCase):
                 self.assertTrue(result["isError"])
                 self.assertLess(len(result["content"][0]["text"]), 20_000)
                 pid = int(pid_file.read_text(encoding="utf-8"))
-                self.assertFalse(process_exists(pid), f"grandchild {pid} survived {mode}")
+                alive = process_exists(pid)
+                print(
+                    f"[CI-DIAG] runner-tree mode={mode} pid={pid} "
+                    f"alive={alive} result={result['content'][0]['text'][:160]!r}",
+                    flush=True,
+                )
+                try:
+                    self.assertFalse(alive, f"grandchild {pid} survived {mode}")
+                finally:
+                    if alive and os.name != "nt":
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_runner_settles_when_process_tree_termination_never_settles(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
