@@ -52,7 +52,8 @@ class ContractCase(unittest.TestCase):
         self.assertTrue(RENDERER.is_file())
         self.assertTrue((ROOT / "scripts" / "office_hook_registry.py").is_file())
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("office_hook_registry.py install", readme)
+        self.assertIn("scripts/install_office_os.ps1", readme)
+        self.assertIn("office_hook_registry.py uninstall", readme)
         self.assertIn("~/.codex/hooks.json", readme)
         self.assertLessEqual(len(manifest["interface"]["defaultPrompt"]), 3)
 
