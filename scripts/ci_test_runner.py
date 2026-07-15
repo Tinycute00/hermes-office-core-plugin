@@ -141,6 +141,59 @@ def reap_linux_zombie_children(identities: dict[int, LinuxProcessIdentity]) -> N
             continue
 
 
+def linux_direct_child_identities() -> dict[int, LinuxProcessIdentity]:
+    children_file = (
+        Path("/proc") / str(os.getpid()) / "task" / str(os.getpid()) / "children"
+    )
+    try:
+        child_pids = [
+            int(value)
+            for value in children_file.read_text(encoding="utf-8").split()
+        ]
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    identities: dict[int, LinuxProcessIdentity] = {}
+    for pid in child_pids:
+        identity = read_linux_process_identity(pid)
+        if identity is not None and identity.parent_pid == os.getpid():
+            identities[pid] = identity
+    return identities
+
+
+def reap_new_linux_zombies(
+    baseline: dict[int, LinuxProcessIdentity], protected_pid: int
+) -> None:
+    zombies = {
+        pid: identity
+        for pid, identity in linux_direct_child_identities().items()
+        if pid != protected_pid
+        and identity.state == "Z"
+        and (
+            pid not in baseline
+            or baseline[pid].start_ticks != identity.start_ticks
+        )
+    }
+    reap_linux_zombie_children(zombies)
+
+
+def wait_for_command_exit(
+    process: subprocess.Popen[object],
+    timeout_seconds: float,
+    baseline_linux_processes: dict[int, LinuxProcessIdentity] | None,
+) -> int | None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        exit_code = process.poll()
+        if exit_code is not None:
+            return exit_code
+        if baseline_linux_processes is not None:
+            reap_new_linux_zombies(baseline_linux_processes, process.pid)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.05, remaining))
+
+
 def wait_for_posix_process_group_exit(
     process: subprocess.Popen[object], timeout_seconds: float
 ) -> bool:
@@ -309,9 +362,10 @@ def run_command(
             enable_linux_child_subreaper()
             baseline_linux_processes = snapshot_linux_process_tree(os.getpid())
     process = subprocess.Popen(command, stdin=subprocess.DEVNULL, **options)
-    try:
-        exit_code = process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
+    exit_code = wait_for_command_exit(
+        process, timeout_seconds, baseline_linux_processes
+    )
+    if exit_code is None:
         print(
             f"[CI-WATCHDOG] deadline {timeout_seconds:g}s exceeded; "
             "terminating the isolated test process tree.",
@@ -319,6 +373,8 @@ def run_command(
         )
         try:
             terminate_process_tree(process, grace_seconds)
+            if baseline_linux_processes is not None:
+                cleanup_linux_adopted_processes(baseline_linux_processes, grace_seconds)
         except RuntimeError as error:
             print(f"[CI-WATCHDOG] termination failure: {error}", flush=True)
             return RunResult(125, timed_out=True)
