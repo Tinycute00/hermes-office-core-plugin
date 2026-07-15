@@ -209,6 +209,7 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     diagnostic = configuration.get("diagnostic")
     watcher = None
     if isinstance(diagnostic, str) and sys.platform.startswith("linux"):
+        print(f"[CI-DIAG] runner-wrapper phase={diagnostic} watcher-before", flush=True)
         watcher = subprocess.Popen(
             [
                 "sh",
@@ -225,7 +226,13 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
             ],
             cwd=ROOT,
         )
+        print(
+            f"[CI-DIAG] runner-wrapper phase={diagnostic} watcher-started pid={watcher.pid}",
+            flush=True,
+        )
     try:
+        if isinstance(diagnostic, str):
+            print(f"[CI-DIAG] runner-wrapper phase={diagnostic} node-before", flush=True)
         completed = subprocess.run(
             [NODE or "node", "-e", script, os.fspath(RUNNER)],
             cwd=ROOT,
@@ -237,6 +244,11 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
             check=False,
             timeout=2 if configuration.get("nonsettlingKill") else 15,
         )
+        if isinstance(diagnostic, str):
+            print(
+                f"[CI-DIAG] runner-wrapper phase={diagnostic} node-returned rc={completed.returncode}",
+                flush=True,
+            )
     finally:
         if watcher is not None and watcher.poll() is None:
             watcher.terminate()
