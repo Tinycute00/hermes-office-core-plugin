@@ -13,7 +13,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from unittest import mock
 
@@ -208,11 +207,24 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     environment = os.environ.copy()
     environment["PLUGIN_DATA"] = os.fspath(data_root)
     diagnostic = configuration.get("diagnostic")
-    timer = None
-    if isinstance(diagnostic, str):
-        timer = threading.Timer(5, print_test_descendants, args=(diagnostic,))
-        timer.daemon = True
-        timer.start()
+    watcher = None
+    if isinstance(diagnostic, str) and sys.platform.startswith("linux"):
+        watcher = subprocess.Popen(
+            [
+                "sh",
+                "-c",
+                "sleep 5; echo \"[CI-DIAG] runner-wrapper phase=$1 parent=$2\"; "
+                "for pid in $(ps -o pid= --ppid \"$2\"); do "
+                "[ \"$pid\" = \"$$\" ] && continue; "
+                "ps -o pid=,ppid=,pgid=,sid=,stat=,comm= -p \"$pid\"; "
+                "ps -o pid=,ppid=,pgid=,sid=,stat=,comm= --ppid \"$pid\"; "
+                "done",
+                "diagnostic",
+                diagnostic,
+                str(os.getpid()),
+            ],
+            cwd=ROOT,
+        )
     try:
         completed = subprocess.run(
             [NODE or "node", "-e", script, os.fspath(RUNNER)],
@@ -226,8 +238,13 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
             timeout=2 if configuration.get("nonsettlingKill") else 15,
         )
     finally:
-        if timer is not None:
-            timer.cancel()
+        if watcher is not None and watcher.poll() is None:
+            watcher.terminate()
+            try:
+                watcher.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                watcher.kill()
+                watcher.wait(timeout=1)
     if completed.returncode != 0:
         raise AssertionError(completed.stderr)
     return json.loads(completed.stdout)
