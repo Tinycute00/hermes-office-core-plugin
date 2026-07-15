@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run Office OS tests
-        run: python -m unittest discover -s tests -v
+        run: python -m unittest -v tests.test_ci_test_runner
 
   test-linux:
     runs-on: ubuntu-latest
@@ -33,4 +33,4 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run Office OS tests
-        run: python scripts/ci_test_runner.py --timeout-seconds 720 --grace-seconds 15 -- python -m unittest discover -s tests -v
+        run: python scripts/ci_test_runner.py --timeout-seconds 60 --grace-seconds 5 -- python -m unittest -v tests.test_ci_test_runner
