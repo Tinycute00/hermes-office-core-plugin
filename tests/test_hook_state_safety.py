@@ -71,6 +71,18 @@ class HookStateSafetyCase(HookCliFixture):
         self.named("linked-workspace")
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "outside")
 
+    def test_directory_link_cleanup_preserves_replacement_directory(self) -> None:
+        target = self.base / "outside-link-target"
+        target.mkdir()
+        link = self.base / "replaced-directory"
+        self.create_directory_link(link, target)
+
+        self.remove_directory_link(link)
+        link.mkdir()
+        self.remove_directory_link(link)
+
+        self.assertTrue(link.is_dir())
+
     def test_hardlinked_dedup_and_root_lock_leave_external_sentinel_unchanged(self) -> None:
         directory = self.workspace_data()
         sentinel = self.base / "dedup-sentinel"

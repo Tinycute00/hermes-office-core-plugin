@@ -69,8 +69,10 @@ class HookCliFixture(unittest.TestCase):
         if not os.path.lexists(link):
             return
         if os.name == "nt":
+            if not os.path.isjunction(link):
+                return
             os.rmdir(link)
-        else:
+        elif link.is_symlink():
             link.unlink()
 
     def workspace_data(self) -> Path:

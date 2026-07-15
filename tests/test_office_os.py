@@ -1599,6 +1599,10 @@ class CoreCase(unittest.TestCase):
         self.assertEqual(len({state["task_key"] for state in states}), len(tasks))
         self.assertEqual(len(set(targets)), len(tasks))
         self.assertTrue(all(target.is_file() for target in targets))
+        self.assertTrue(all(len(target.name.encode("utf-8")) <= 240 for target in targets))
+        self.assertTrue(
+            all(len(f"{target.name}.bak.3".encode("utf-8")) <= 255 for target in targets)
+        )
 
         module = load_core_module()
         self.assertEqual(

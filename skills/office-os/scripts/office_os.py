@@ -581,10 +581,24 @@ def combined_source_digest(values: Sequence[Fingerprint]) -> str | None:
 
 
 def collision_safe_part(value: str, maximum: int) -> str:
-    if len(value) <= maximum:
+    if len(value.encode("utf-8")) <= maximum:
         return value
     suffix = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
-    return f"{value[: maximum - len(suffix) - 1]}-{suffix}"
+    suffix = f"-{suffix}"
+    prefix = utf8_prefix(value, maximum - len(suffix.encode("utf-8"))).rstrip(" .-")
+    return f"{prefix or 'Office OS Result'}{suffix}"
+
+
+def utf8_prefix(value: str, maximum: int) -> str:
+    parts: list[str] = []
+    remaining = maximum
+    for character in value:
+        encoded = character.encode("utf-8")
+        if len(encoded) > remaining:
+            break
+        parts.append(character)
+        remaining -= len(encoded)
+    return "".join(parts)
 
 
 def canonical_task_identity(task: str) -> str:
@@ -611,7 +625,9 @@ def safe_task_filename(task: str) -> str:
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "-", identity).strip(" .-")
     readable = cleaned or "Office OS Result"
-    return f"{readable[:87].rstrip(' .-')}-{digest}"
+    suffix = f"-{digest}"
+    prefix = utf8_prefix(readable, 100 - len(suffix.encode("utf-8"))).rstrip(" .-")
+    return f"{prefix or 'Office OS Result'}{suffix}"
 
 
 def bounded_integer(value: str, minimum: int, maximum: int, label: str) -> int:
