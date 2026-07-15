@@ -141,22 +141,27 @@ def run_authorizer(candidate: Path, data_root: Path) -> dict:  # noqa: DICT_OK
     return json.loads(completed.stdout)
 
 
-def run_authorizer_with_reparse_probe(candidate: Path, data_root: Path) -> dict:  # noqa: DICT_OK
+def run_authorizer_with_reparse_probe(
+    candidate: Path, data_root: Path, file_candidate: Path | None = None, repeats: int = 1
+) -> dict:  # noqa: DICT_OK
     script = (
-        "const Module=require('node:module');const original=Module._load;let probes=0;"
+        "const Module=require('node:module');const original=Module._load;let probes=0;const batches=[];"
         "Module._load=function(request,parent,isMain){if(request==='node:child_process'){"
         "const child=original.apply(this,arguments);return {...child,spawnSync:(_command,_arguments,options)=>{"
-        "probes+=1;const paths=JSON.parse(options.env.OFFICE_OS_REPARSE_PATHS).paths;"
+        "probes+=1;const paths=JSON.parse(options.env.OFFICE_OS_REPARSE_PATHS).paths;batches.push(paths);"
         "return {status:0,stdout:JSON.stringify(paths.map(()=>false))};}};}"
         "return original.apply(this,arguments);};const authority=require(process.argv[1]);"
-        "try{const run=authority.authorizeMutation(process.argv[2]);"
-        "process.stdout.write(JSON.stringify({run,probes}));}"
-        "catch(error){process.stdout.write(JSON.stringify({error:error.message,probes}));}"
+        "const files=process.argv[3]?[process.argv[3]]:[];const runs=[],errors=[];"
+        "for(let index=0;index<Number(process.argv[4]);index+=1){try{"
+        "runs.push(authority.authorizeMutation(process.argv[2],files));}"
+        "catch(error){errors.push(error.message);}}"
+        "process.stdout.write(JSON.stringify({run:runs[0],error:errors[0],runs,errors,probes,batches}));"
     )
     environment = os.environ.copy()
     environment["PLUGIN_DATA"] = os.fspath(data_root)
     completed = subprocess.run(
-        [NODE or "node", "-e", script, os.fspath(AUTHORITY), os.fspath(candidate)],
+        [NODE or "node", "-e", script, os.fspath(AUTHORITY), os.fspath(candidate),
+         "" if file_candidate is None else os.fspath(file_candidate), str(repeats)],
         cwd=ROOT,
         env=environment,
         text=True,
@@ -453,13 +458,8 @@ class OfficeCLICase(unittest.TestCase):
                         "name": "officecli",
                         "arguments": {
                             "command": [
-                                "add",
-                                os.fspath(target),
-                                "/Sheet1",
-                                "--type",
-                                "image",
-                                "--prop",
-                                f"src={private_image}",
+                                "add", os.fspath(target), "/Sheet1", "--type", "image",
+                                "--prop", f"src={private_image}",
                             ]
                         },
                     },
@@ -471,9 +471,43 @@ class OfficeCLICase(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr.decode())
             response = json.loads(completed.stdout.splitlines()[-1])
 
-            # Then: policy denies the request before the child executor is reached.
+            # Then: the adapter extracts the file property and authority denies
+            # it before the child executor is reached.
             self.assertTrue(response["result"].get("isError", False), response)
             self.assertFalse(capture.exists())
+
+    def test_cross_run_file_property_batches_reparse_probes_per_request(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            target_run = candidate_root / ("a" * 32)
+            private_run = candidate_root / ("b" * 32)
+            target_run.mkdir(parents=True)
+            private_run.mkdir()
+            target = target_run / "candidate.xlsx"
+            private_image = private_run / "private.png"
+            target.write_bytes(b"candidate")
+            private_image.write_bytes(b"private")
+            for workspace, run_id, directory in (
+                ("target", "a" * 32, target_run),
+                ("private", "b" * 32, private_run),
+            ):
+                state_directory = data_root / "workspaces" / workspace
+                state_directory.mkdir(parents=True)
+                (state_directory / "run_state.json").write_text(
+                    json.dumps({"run_id": run_id, "candidate_directory": os.fspath(directory),
+                                "proposal_confirmed": True, "status": "executing"}),
+                    encoding="utf-8",
+                )
+
+            result = run_authorizer_with_reparse_probe(target, data_root, private_image)
+            self.assertIn("error", result)
+            self.assertIn("File-bearing property", result["error"])
+            self.assertLessEqual(result["probes"], 3)
+            repeated = run_authorizer_with_reparse_probe(target, data_root, private_image, repeats=2)
+            self.assertEqual(repeated["errors"], [result["error"], result["error"]])
+            self.assertEqual(repeated["probes"], 6)
 
     def test_mutation_authorizer_fails_closed_for_stale_and_invalid_state_inventory(self) -> None:
         def fixture() -> tuple[Path, Path, Path, str]:
@@ -601,6 +635,53 @@ class OfficeCLICase(unittest.TestCase):
             self.assertNotIn("error", result)
             self.assertEqual(result["run"]["runId"], run_id)
             self.assertLessEqual(result["probes"], 32)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point batching is Windows-specific")
+    def test_mutation_authorizer_covers_non_divisible_reparse_batch_tails(self) -> None:
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            base = Path(temporary)
+            data_root = base / "plugin-data"
+            candidate_root = data_root / "officecli-candidates"
+            run_id = "e" * 32
+            run_directory = candidate_root / run_id
+            run_directory.mkdir(parents=True)
+            candidate = run_directory / "candidate.xlsx"
+            candidate.write_bytes(b"candidate")
+            workspaces = data_root / "workspaces"
+            workspaces.mkdir()
+            expected_workspaces: set[str] = set()
+            expected_states: set[str] = set()
+            for number in range(129):
+                workspace = workspaces / f"workspace-{number:03d}"
+                workspace.mkdir()
+                state_path = workspace / "run_state.json"
+                state_path.write_text(
+                    json.dumps(
+                        {
+                            "run_id": run_id,
+                            "candidate_directory": os.fspath(
+                                run_directory if number == 0 else candidate_root / f"other-{number:03d}"
+                            ),
+                            "proposal_confirmed": True,
+                            "status": "executing",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                expected_workspaces.add(os.path.normcase(os.path.normpath(os.fspath(workspace))))
+                expected_states.add(os.path.normcase(os.path.normpath(os.fspath(state_path))))
+
+            result = run_authorizer_with_reparse_probe(candidate, data_root)
+            self.assertNotIn("error", result)
+            self.assertTrue(result["batches"])
+            self.assertTrue(all(len(batch) <= 64 for batch in result["batches"]))
+            flattened = {
+                os.path.normcase(os.path.normpath(item))
+                for batch in result["batches"]
+                for item in batch
+            }
+            self.assertTrue(expected_workspaces.issubset(flattened))
+            self.assertTrue(expected_states.issubset(flattened))
 
     def test_authorized_postflight_cleanup_preserves_candidate_root_and_sentinels(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
