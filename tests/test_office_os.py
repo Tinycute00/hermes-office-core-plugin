@@ -509,10 +509,15 @@ class CoreCase(unittest.TestCase):
         document = self.workspace / "short-name.docx"
         write_docx(document, "short-name")
         short = short_windows_path(document)
-        expected = Path(os.path.normpath(os.path.abspath(os.fspath(document))))
+        if os.path.normcase(os.fspath(short)) == os.path.normcase(os.fspath(document)):
+            self.skipTest("fixture path has no distinct Windows short alias")
 
         with mock.patch.object(module.os.path, "realpath", return_value=os.fspath(short)):
-            self.assertEqual(module.canonical_path(document), expected)
+            canonical = module.canonical_path(document)
+        self.assertTrue(os.path.samefile(canonical, document))
+        self.assertNotEqual(
+            os.path.normcase(os.fspath(canonical)), os.path.normcase(os.fspath(short))
+        )
 
     def test_knowledge_map_retention_caps_documents_chunks_and_text(self) -> None:
         module = load_core_module()
@@ -2476,7 +2481,8 @@ class CoreCase(unittest.TestCase):
         self.assertIn("synthetic cleanup failure", result["candidate_cleanup_error"])
         self.assertTrue(Path(result["target"]).is_file())
         state = json.loads((directory / "run_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["candidate"], os.fspath(module.canonical_path(candidate)))
+        self.assertEqual(state["candidate"], os.fspath(candidate))
+        self.assertTrue(os.path.samefile(state["candidate"], candidate))
         self.assertIsNotNone(state["candidate_directory"])
         self.run_core("complete", "--summary", "published with deferred cleanup")
 
