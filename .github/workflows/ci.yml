@@ -19,6 +19,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run OfficeCLI shutdown diagnosis
+      - name: Run OfficeCLI runner-sequence diagnosis
         shell: bash
-        run: python -u scripts/ci_test_runner.py --timeout-seconds 420 --grace-seconds 5 -- python -u -m unittest -v tests.test_officecli
+        run: >-
+          python -u scripts/ci_test_runner.py --timeout-seconds 120 --grace-seconds 5 --
+          python -u -m unittest -v
+          tests.test_officecli.OfficeCLICase.test_runner_kills_tree_on_timeout_and_overflow
+          tests.test_officecli.OfficeCLICase.test_runner_rejects_preexisting_candidate_quota_before_child_process
+          tests.test_officecli.OfficeCLICase.test_runner_reports_candidate_quota_growth_after_child_process
+          tests.test_officecli.OfficeCLICase.test_runner_settles_when_process_tree_termination_never_settles

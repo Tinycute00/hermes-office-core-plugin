@@ -1160,7 +1160,9 @@ class OfficeCLICase(unittest.TestCase):
     def test_runner_settles_when_process_tree_termination_never_settles(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             data_root = Path(temporary) / "plugin-data"
+            print("[CI-DIAG] runner-tree phase=nonsettling-start", flush=True)
             result = run_runner({"nonsettlingKill": True}, data_root)
+            print("[CI-DIAG] runner-tree phase=nonsettling-returned", flush=True)
         self.assertEqual(result["error"], "OfficeCLI command timed out. Process termination did not complete.")
 
     def test_screenshot_success_and_failure_cleanup(self) -> None:
@@ -1250,6 +1252,7 @@ class OfficeCLICase(unittest.TestCase):
             for number in range(33):
                 (candidate_root / f"candidate-{number}.xlsx").write_bytes(b"x")
             marker = base / "child-ran"
+            print("[CI-DIAG] runner-tree phase=quota-pre-start", flush=True)
             result = run_runner(
                 {
                     "parsed": {
@@ -1263,6 +1266,7 @@ class OfficeCLICase(unittest.TestCase):
                 },
                 data_root,
             )
+            print("[CI-DIAG] runner-tree phase=quota-pre-returned", flush=True)
             self.assertTrue(result["isError"])
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertFalse(marker.exists())
@@ -1278,6 +1282,7 @@ class OfficeCLICase(unittest.TestCase):
                 "for(let index=0;index<33;index+=1){"
                 "fs.writeFileSync(path.join(process.argv[1],'candidate-'+index+'.xlsx'),'x');}"
             )
+            print("[CI-DIAG] runner-tree phase=quota-growth-start", flush=True)
             result = run_runner(
                 {
                     "parsed": {
@@ -1287,6 +1292,7 @@ class OfficeCLICase(unittest.TestCase):
                 },
                 data_root,
             )
+            print("[CI-DIAG] runner-tree phase=quota-growth-returned", flush=True)
             self.assertTrue(result["isError"])
             self.assertIn("candidate limits", result["content"][0]["text"])
             self.assertEqual(len(list(candidate_root.iterdir())), 33)
