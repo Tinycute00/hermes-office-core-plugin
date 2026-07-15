@@ -186,9 +186,9 @@ def run_authorizer_with_reparse_probe(
 
 def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
     script = (
-        "let input='';"
+        "const fs=require('node:fs');const note=(value)=>{if(process.env.RUNNER_DIAG_FILE)fs.appendFileSync(process.env.RUNNER_DIAG_FILE,value+'\\n');};let input='';"
         "process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);"
-        "process.stdin.on('end',async()=>{const c=JSON.parse(input);try{"
+        "process.stdin.on('end',async()=>{note('input-end');const c=JSON.parse(input);note('parsed');try{"
         "if(c.nonsettlingKill){const {EventEmitter}=require('node:events');"
         "const childProcess=require('node:child_process');let launches=0;"
         "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++launches;"
@@ -196,17 +196,20 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
         "const runner=require(process.argv[1]);try{await runner.runProcess('fake',[],1,25);"
         "process.stdout.write(JSON.stringify({error:'settled'}));}catch(error){"
         "process.stdout.write(JSON.stringify({error:error.message}));}return;}"
-        "const runner=require(process.argv[1]);"
+        "const runner=require(process.argv[1]);note('runner-required');"
         "for(const [key,value] of Object.entries(c.inheritedEnvironment||{}))process.env[key]=value;"
         "if(c.constants){process.stdout.write(JSON.stringify(runner.CONSTANTS));return;}"
         "if(c.environment){process.stdout.write(JSON.stringify(runner.childEnvironment()));return;}"
-        "const result=await runner.runTool(process.execPath,c.parsed,c.options||{});"
-        "process.stdout.write(JSON.stringify(result));"
-        "}catch(error){process.stdout.write(JSON.stringify({error:error.message}));}});"
+        "note('run-tool-before');const result=await runner.runTool(process.execPath,c.parsed,c.options||{});note('run-tool-after');"
+        "process.stdout.write(JSON.stringify(result));note('result-written');"
+        "}catch(error){note('catch:'+String(error.message).slice(0,80));process.stdout.write(JSON.stringify({error:error.message}));}});"
     )
     environment = os.environ.copy()
     environment["PLUGIN_DATA"] = os.fspath(data_root)
     diagnostic = configuration.get("diagnostic")
+    diagnostic_file = data_root.parent / "runner-wrapper-phases.log"
+    if isinstance(diagnostic, str):
+        environment["RUNNER_DIAG_FILE"] = os.fspath(diagnostic_file)
     watcher = None
     if isinstance(diagnostic, str) and sys.platform.startswith("linux"):
         print(f"[CI-DIAG] runner-wrapper phase={diagnostic} watcher-before", flush=True)
@@ -219,10 +222,11 @@ def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
                 "[ \"$pid\" = \"$$\" ] && continue; "
                 "ps -o pid=,ppid=,pgid=,sid=,stat=,comm= -p \"$pid\"; "
                 "ps -o pid=,ppid=,pgid=,sid=,stat=,comm= --ppid \"$pid\"; "
-                "done",
+                "done; if [ -f \"$3\" ]; then printf '%s\\n' '[CI-DIAG] runner-wrapper phases'; cat \"$3\"; fi",
                 "diagnostic",
                 diagnostic,
                 str(os.getpid()),
+                os.fspath(diagnostic_file),
             ],
             cwd=ROOT,
         )
