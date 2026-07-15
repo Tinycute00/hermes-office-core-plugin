@@ -230,6 +230,14 @@ def process_exists(pid: int) -> bool:
             check=False,
         )
         return str(pid) in completed.stdout and "No tasks" not in completed.stdout
+    if sys.platform.startswith("linux"):
+        try:
+            stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        _, separator, fields = stat.rpartition(")")
+        if separator and fields.lstrip().startswith(("Z", "X")):
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
