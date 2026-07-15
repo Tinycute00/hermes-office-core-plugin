@@ -184,13 +184,15 @@ def run_authorizer_with_reparse_probe(
 
 
 def run_runner(configuration: dict, data_root: Path) -> dict:  # noqa: DICT_OK
+    # The nonsettling fake deliberately has no PID, so Unix group cleanup cannot
+    # signal a real CI process while this harness exercises the terminal deadline.
     script = (
         "let input='';"
         "process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);"
         "process.stdin.on('end',async()=>{const c=JSON.parse(input);try{"
         "if(c.nonsettlingKill){const {EventEmitter}=require('node:events');"
         "const childProcess=require('node:child_process');let launches=0;"
-        "childProcess.spawn=()=>{const child=new EventEmitter();child.pid=++launches;"
+        "childProcess.spawn=()=>{const child=new EventEmitter();launches+=1;"
         "if(launches===1){child.stdout=new EventEmitter();child.stderr=new EventEmitter();}return child;};"
         "const runner=require(process.argv[1]);try{await runner.runProcess('fake',[],1,25);"
         "process.stdout.write(JSON.stringify({error:'settled'}));}catch(error){"
