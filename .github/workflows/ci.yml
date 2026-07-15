@@ -10,7 +10,7 @@ permissions:
 jobs:
   test-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,10 +21,23 @@ jobs:
           python-version: "3.12"
       - name: Run OfficeCLI runner-sequence diagnosis
         shell: bash
-        run: >-
-          python -u scripts/ci_test_runner.py --timeout-seconds 120 --grace-seconds 5 --
-          python -u -m unittest -v
-          tests.test_officecli.OfficeCLICase.test_runner_kills_tree_on_timeout_and_overflow
-          tests.test_officecli.OfficeCLICase.test_runner_rejects_preexisting_candidate_quota_before_child_process
-          tests.test_officecli.OfficeCLICase.test_runner_reports_candidate_quota_growth_after_child_process
-          tests.test_officecli.OfficeCLICase.test_runner_settles_when_process_tree_termination_never_settles
+        run: |
+          set -o pipefail
+          (
+            sleep 8
+            printf '%s\n' '[CI-DIAG] workflow-monitor begin'
+            ps -eo pid=,ppid=,pgid=,sid=,stat=,wchan:32=,comm=,args= --forest || true
+            printf '%s\n' '[CI-DIAG] workflow-monitor end'
+          ) &
+          monitor_pid=$!
+          set +e
+          python -u scripts/ci_test_runner.py --timeout-seconds 120 --grace-seconds 5 -- \
+            python -u -m unittest -v \
+            tests.test_officecli.OfficeCLICase.test_runner_kills_tree_on_timeout_and_overflow \
+            tests.test_officecli.OfficeCLICase.test_runner_rejects_preexisting_candidate_quota_before_child_process \
+            tests.test_officecli.OfficeCLICase.test_runner_reports_candidate_quota_growth_after_child_process \
+            tests.test_officecli.OfficeCLICase.test_runner_settles_when_process_tree_termination_never_settles
+          status=$?
+          set -e
+          wait "$monitor_pid" || true
+          exit "$status"
